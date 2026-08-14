@@ -16,17 +16,33 @@ When the agent messes up, the audit trail tells you what happened, the
 binding tells you who's accountable, and the next iteration has tighter
 scope.
 
+This framework implements a reference architecture for safe agents:
+
+Layer 1: Safety Protocol (enforcement) — scope, budget, approval, monitoring,
+    audit trail (off-chain complete record), kill switch.
+
+Layer 2: On-chain anchors — SBT-style non-transferable binding, on-chain audit
+    for key events (high-value actions, approvals, kill switch, scope violations).
+    Verifiable by anyone. Tamper-resistant.
+
+Layer 3: Insurance interface — claims-ready evidence, underwriter reports,
+    control-adjusted exposure estimates. The protocol makes the agent insurable
+    by providing verifiable evidence of what happened and controls that operated.
+
+The framework is framework-agnostic: works with any LLM, any runtime, any chain.
+In production, swap the simulated on-chain layer for real ERC-5192/ERC-8004 + a
+real chain, and the insurance interface for a real insurer's claims process.
+
 Installation:
     pip install safety-protocol
 
 Quick start:
 
-    from safety_protocol import SafetyProtocol, BoundAgent, AuditTrail
+    from safety_protocol import (
+        SafetyProtocol, BoundAgent, ScopeRule, AuditTrail, Monitor
+    )
 
-    # Create audit trail
     audit = AuditTrail()
-
-    # Create safety protocol with scope rules and budget
     protocol = SafetyProtocol(
         agent_id="agent-001",
         user_id="alice",
@@ -43,14 +59,12 @@ Quick start:
         audit=audit,
     )
 
-    # Create a bound agent
     agent = BoundAgent(
         agent_id="agent-001",
         user_id="alice",
         safety_protocol=protocol,
     )
 
-    # Agent proposes an action — protocol decides
     result = agent.propose_action(
         action_type="api_call",
         target="https://api.example.com/v1/search",
@@ -60,10 +74,72 @@ Quick start:
 
     print(result.outcome)  # ActionOutcome.ALLOWED
 
-    # Agent CANNOT bypass the protocol. Period.
-    # The protocol enforces: binding, scope, budget, approval, kill switch.
-"""
+For the full reference architecture with on-chain binding, on-chain audit,
+and insurance interface:
 
+    from safety_protocol.deployment import ReferenceDeployment
+
+    deployment = ReferenceDeployment(
+        agent_id="agent-001",
+        user_id="alice",
+        agent_name="ResearchAgent",
+        agent_role="AI research assistant",
+    )
+
+    # Agent proposes action — full stack enforces
+    result = deployment.agent_propose_action(
+        action_type="api_call",
+        target="https://api.example.com/v1/search",
+        params={"query": "test"},
+        estimated_cost=2.50,
+    )
+
+    # Get binding proof (verifiable by anyone)
+    proof = deployment.get_binding_proof()
+
+    # Get claims evidence (for insurance)
+    evidence = deployment.get_claim_evidence(
+        claim_description="Agent made incorrect API call",
+    )
+
+    # Get underwriter package (for binding coverage)
+    underwriter = deployment.get_underwriter_package(
+        agent_description="Research agent that calls APIs",
+        task_profile="API calls, message sending",
+        max_potential_loss=5000.0,
+    )
+
+The problem this solves:
+-----------------------
+AI agents can take actions with real consequences: spending money, calling
+APIs, modifying systems, sending messages, spawning subagents. The model's
+good behavior is not reliable enough to depend on. The safety protocol makes
+the agent *safe to operate* by enforcing constraints in infrastructure, not
+in prompts.
+
+When the agent messes up, you need to know: what happened, who's accountable,
+what controls operated, what can be reconstructed. The binding + audit trail
++ on-chain record answer these questions. The insurance interface makes the
+agent insurable by providing claims-ready evidence.
+
+This is a reference architecture, not a product. The on-chain layer is
+simulated (same interface as real chain). In production, use ERC-5192 SBT or
+ERC-8004 on a real chain, and connect the insurance interface to a real
+insurer's claims process.
+
+The architecture is composable: use the protocol alone, add on-chain binding,
+add on-chain audit, add insurance interface — each layer is independent and
+adds value on its own.
+
+Documentation:
+    - Core protocol: src/safety_protocol/protocol.py
+    - On-chain binding: src/safety_protocol/onchain.py
+    - On-chain audit: src/safety_protocol/onchain_audit.py
+    - Insurance interface: src/safety_protocol/insurance.py
+    - Reference deployment: src/safety_protocol/deployment.py
+    - Example (LLM agent): examples/llm_agent.py
+    - Example (reference deployment): examples/reference_deployment.py
+"""
 from .core import (
     ActionOutcome,
     ProtocolState,
@@ -73,11 +149,14 @@ from .core import (
     ScopeRule,
     AuditTrail,
     Monitor,
-    SafetyProtocol,
-    BoundAgent,
 )
+from .protocol import SafetyProtocol, BoundAgent
+from .onchain import OnChainBindingRegistry, OnChainBoundProtocol
+from .onchain_audit import OnChainAudit, DualAudit
+from .insurance import InsuranceInterface
+from .deployment import ReferenceDeployment
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "ActionOutcome",
     "ProtocolState",
@@ -89,5 +168,11 @@ __all__ = [
     "Monitor",
     "SafetyProtocol",
     "BoundAgent",
+    "OnChainBindingRegistry",
+    "OnChainBoundProtocol",
+    "OnChainAudit",
+    "DualAudit",
+    "InsuranceInterface",
+    "ReferenceDeployment",
     "__version__",
 ]

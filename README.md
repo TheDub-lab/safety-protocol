@@ -1,0 +1,254 @@
+# Safety Protocol Framework
+
+**Agent safety is infrastructure, not prompts.**
+
+AI agents can spend money, call APIs, modify systems, send messages, and spawn subagents. The model's good behavior isn't reliable enough to build on. Safety has to be enforced in infrastructure — scope, budget, approval gates, monitoring, audit trail, kill switch — not hoped for in a system prompt.
+
+This framework provides the enforcement layer. The agent operates freely **within** the bounds. The bounds are enforced by code, not by the model.
+
+When the agent messes up, the audit trail tells you what happened, the binding tells you who's accountable, and the next iteration has tighter scope. That's the model.
+
+---
+
+## The problem
+
+LLMs are increasingly used as agents — systems that take actions in the world, not just generate text. That creates a real safety problem that prompt engineering doesn't solve:
+
+- The model can be wrong, drift, or be manipulated
+- The model doesn't reliably stay within scope
+- The model doesn't reliably respect budget
+- There's no reliable way to stop the agent when something goes wrong
+- There's no reliable audit trail when something goes wrong
+- There's no reliable binding between the agent and the accountable user
+
+These aren't hypothetical. They're showing up in deployed systems now. And they're not solved by telling the model to be careful.
+
+---
+
+## What this framework does
+
+A safety protocol that sits between the agent and the world. Every action the agent wants to take passes through it. The protocol decides what happens. The agent cannot bypass it.
+
+**Binding** — the agent is unambiguously tied to a user. Every action is attributable. The binding can be on-chain (SBT-style, non-transferable, verifiable by anyone).
+
+**Scope** — what the agent can and can't do, enforced at the gate. Allowed targets, forbidden patterns, action types, sub-agent spawning. The model cannot talk its way around it.
+
+**Budget** — hard limits on spend. The protocol blocks actions that would exceed the budget. This is infrastructure, not a suggestion.
+
+**Approval gates** — consequential actions need human sign-off. Above a cost threshold, critical urgency, or configured action types.
+
+**Monitoring** — live visibility into what the agent is doing. Action counts, costs, pending approvals, alerts for anomalies.
+
+**Audit trail** — immutable, append-only log. Every event hashed into a chain so tampering is detectable. Complete reconstruction of everything that happened.
+
+**Kill switch** — immediate, total freeze. All actions blocked. The user can stop the agent instantly.
+
+**On-chain binding** — SBT-style non-transferable binding. Anyone can verify: this agent is bound to this user. The binding is permanent (non-transferable) and revocable by the user.
+
+**On-chain audit** — key events recorded on-chain: binding, high-value actions, approvals, kill switch, scope violations. Verifiable, tamper-resistant, public.
+
+**Insurance interface** — claims-ready evidence and underwriter-ready reports. The protocol's audit trail and on-chain record feed insurance claims. The control configuration feeds underwriting. The controls reduce insurable exposure.
+
+---
+
+## Architecture
+
+```
+Layer 0 (off-chain): Runtime
+    LLM inference, reasoning, planning, memory, tool access
+    The agent's brain. Expensive, latency-sensitive. Stays off-chain.
+
+Layer 1 (the protocol): Policy & Enforcement
+    Binding | Scope | Budget | Approval | Monitoring | Audit (off-chain) | Kill switch
+    Every action passes through here. The agent cannot bypass.
+
+Layer 2 (on-chain): Anchors
+    SBT/ERC-8004 binding (non-transferable, verifiable)
+    On-chain audit for key events (binding, high-value, approvals, kill switch, violations)
+    Settlement (x402, stablecoins) when payments are involved
+
+Layer 3 (economic trust): Insurance
+    Claims evidence from audit trail + on-chain record
+    Underwriter reports from control configuration
+    Control-adjusted exposure (better controls → lower exposure → lower premium)
+```
+
+The chain doesn't run the agent. It anchors the binding, records the key events, and settles payments. The protocol enforces at runtime. Insurance backs the residual.
+
+---
+
+## Quick start
+
+### Basic protocol
+
+```python
+from safety_protocol import (
+    SafetyProtocol, BoundAgent, ScopeRule, AuditTrail, Monitor
+)
+
+# Create audit trail
+audit = AuditTrail()
+
+# Create safety protocol with scope rules and budget
+protocol = SafetyProtocol(
+    agent_id="agent-001",
+    user_id="alice",
+    scope_rules=[
+        ScopeRule(
+            action_type="api_call",
+            allowed_targets=["https://api.example.com/v1/*"],
+            forbidden_targets=["admin", "billing"],
+            max_cost=5.0,
+        ),
+    ],
+    budget_limit=50.0,
+    approval_threshold_cost=10.0,
+    audit=audit,
+)
+
+# Create a bound agent
+agent = BoundAgent(
+    agent_id="agent-001",
+    user_id="alice",
+    safety_protocol=protocol,
+)
+
+# Agent proposes an action — protocol decides
+result = agent.propose_action(
+    action_type="api_call",
+    target="https://api.example.com/v1/search",
+    params={"query": "test"},
+    estimated_cost=2.50,
+)
+
+print(result.outcome)  # ActionOutcome.ALLOWED
+print(protocol.monitor.snapshot())  # Live status
+print(protocol.audit.reconstruct_sequence("agent-001"))  # Full audit
+```
+
+### Reference deployment (full architecture)
+
+```python
+from safety_protocol.deployment import ReferenceDeployment
+from safety_protocol import ScopeRule
+
+deployment = ReferenceDeployment(
+    agent_id="agent-001",
+    user_id="alice",
+    agent_name="ResearchAgent",
+    agent_role="AI research assistant",
+    scope_rules=[
+        ScopeRule(
+            action_type="api_call",
+            allowed_targets=["https://api.research.example/v1/*"],
+            forbidden_targets=["admin", "billing", "internal"],
+            max_cost=8.0,
+        ),
+    ],
+    budget_limit=100.0,
+    approval_threshold=10.0,
+    high_value_threshold=25.0,
+)
+
+# Agent proposes action — full stack enforces
+result = deployment.agent_propose_action(
+    action_type="api_call",
+    target="https://api.research.example/v1/search",
+    params={"query": "AI safety 2026"},
+    estimated_cost=3.50,
+)
+
+# Get binding proof (verifiable by anyone)
+proof = deployment.get_binding_proof()
+
+# Get claims evidence (for insurance)
+evidence = deployment.get_claim_evidence(
+    claim_description="Agent made incorrect API call resulting in data loss",
+)
+
+# Get underwriter package (for binding coverage)
+underwriter = deployment.get_underwriter_package(
+    agent_description="Research agent that calls APIs and sends messages",
+    task_profile="API calls, message sending, limited compute",
+    max_potential_loss=50000.0,
+)
+```
+
+### Run the examples
+
+```bash
+git clone <repo-url>
+cd safety-protocol
+pip install -e .
+python examples/llm_agent.py         # LLM agent operating through the protocol
+python examples/reference_deployment.py  # Full architecture end-to-end
+```
+
+---
+
+## What's real and what's simulated
+
+**Real:**
+- The safety protocol (scope, budget, approval, monitoring, audit trail, kill switch)
+- The binding enforcement (agent cannot act without passing through the protocol)
+- The audit trail (immutable, hashed chain, verifiable)
+- The insurance interface (claims evidence, underwriter reports, exposure estimates)
+
+**Simulated (same interface as production):**
+- On-chain binding (SBT / ERC-5192 / ERC-8004) — in-memory simulation. Same interface as a real smart contract. Swap in the real chain in production.
+- On-chain audit — in-memory simulation. Same interface. Swap in real chain events in production.
+
+**To make it production:**
+- Replace the simulated on-chain layer with real ERC-5192 or ERC-8004 on Ethereum or an L2
+- Connect the insurance interface to a real insurer's claims process
+- Wire it to a real LLM (OpenAI, Anthropic, local model)
+- Add the specific scope rules, budget, and approval thresholds for your use case
+
+---
+
+## What this is and isn't
+
+**This is:**
+- A reference architecture for safe, accountable agents
+- An enforcement layer that makes the agent operable
+- A binding mechanism that ties the agent to an accountable user
+- An audit trail that reconstructs what happened
+- An insurance interface that makes the agent insurable
+
+**This isn't:**
+- A product that prevents all agent failures
+- A replacement for good agent design
+- A fully productionized on-chain deployment (that's up to you to wire to a real chain)
+- Insurance itself (it provides evidence to insurance, it isn't an insurer)
+
+---
+
+## The philosophy
+
+The user is the accountable party. The user monitors. The user builds safety protocols. The agent doesn't run unsupervised.
+
+The agent's mess-ups are how we learn lessons. But the safety protocols exist so the first lesson isn't a catastrophe. The binding exists so accountability is clear. The audit trail exists so we can reconstruct what happened. The insurance interface exists so the consequences are survivable.
+
+The model can be wrong. The protocol doesn't care. The protocol enforces what it enforces, regardless of what the model wants.
+
+This is how we build reliable agents. Not by hoping the model behaves. By enforcing constraints in infrastructure.
+
+---
+
+## Status
+
+Alpha. The protocol works. The reference deployment works. The on-chain layer is simulated (same interface as production). The insurance interface provides evidence and reports — it's not connected to a real insurer.
+
+Use it as a reference architecture. Wire it to your LLM, your chain, your insurer. Adapt the scope rules, budget, and thresholds to your use case.
+
+---
+
+## Author
+
+Michael — building safe, accountable agents with verifiable binding and insurance-ready evidence.
+
+---
+
+## License
+
+MIT
