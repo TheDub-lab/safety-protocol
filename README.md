@@ -33,7 +33,7 @@ A safety protocol that sits between the agent and the world. Every action the ag
 
 **Binding** — the agent is unambiguously tied to a user. Every action is attributable. The binding can be on-chain (SBT-style, non-transferable, verifiable by anyone).
 
-**Scope** — what the agent can and can't do, enforced at the gate. **Deny-by-default**: an action is allowed only if a rule explicitly permits it. A closed action vocabulary (you name the verbs the agent may use) stops the model from inventing a new verb to bypass every rule. Target matching is precise — prefix / glob / exact / regex for allowlists, and token-based matching for forbidden targets (blocks `/api/admin` and `role=admin` but not `readmymind` or `administrator`). The model cannot talk its way around it.
+**Scope** — what the agent can and can't do, enforced at the gate. **Deny-by-default**: an action is allowed only if a rule explicitly permits it. A closed action vocabulary (you name the verbs the agent may use) stops the model from inventing a new verb to bypass every rule. Each rule binds **five** things so a permission can't be deceptive: action type, target (exact/narrow, never catch-all prefix), HTTP method, a JSON-schema-style param binding, and a per-action cost cap. Forbidden targets use token matching (blocks `/api/admin` and `role=admin` but not `readmymind` or `administrator`); allowlists use exact/glob/regex and are normalized for casing. The model cannot talk its way around it — and a scope **linter** fails closed if a rule is too broad.
 
 **Budget** — hard limits on spend. The protocol blocks actions that would exceed the budget. This is infrastructure, not a suggestion.
 
@@ -87,12 +87,14 @@ The chain doesn't run the agent. It anchors the binding, records the key events,
 from safety_protocol import (
     SafetyProtocol, BoundAgent, ScopeRule, AuditTrail, Monitor
 )
+from safety_protocol.scope_linter import lint_rules, Severity
 
 # Create audit trail
 audit = AuditTrail()
 
-# Create safety protocol with scope rules and budget
-# Scope is DENY-BY-DEFAULT: an action is allowed only if a rule permits it.
+# Scope is DENY-BY-DEFAULT and LEAST-PRIVILEGE: a rule binds FIVE things.
+# This is exact-target, method-bound, param-validated, capped — not a
+# catch-all prefix (a prefix on /v1/ would also permit /v1/admin).
 protocol = SafetyProtocol(
     agent_id="agent-001",
     user_id="alice",
@@ -101,10 +103,16 @@ protocol = SafetyProtocol(
             action_type="api_call",
             allowed_targets=["https://api.example.com/v1/search",
                               "https://api.example.com/v1/summarize"],
-            match="prefix",                 # prefix/glob/exact/regex
+            match="exact",                  # exact, never catch-all prefix
+            methods=["POST"],               # only the verb it should use
+            param_schema={                  # params MUST satisfy this
+                "required": ["query"],
+                "properties": {"query": {"type": "string", "maximum": 500}},
+                "additional_properties": False,
+            },
             forbidden_targets=["admin", "billing"],
             forbid_match="token",           # blocks /api/admin, role=admin; not readmymind
-            max_cost=5.0,
+            max_cost=5.0,                   # per-action hard cap
         ),
     ],
     budget_limit=50.0,
@@ -112,6 +120,11 @@ protocol = SafetyProtocol(
     audit=audit,
     allowed_action_types=["api_call", "spend", "send_message"],  # closed verb vocabulary
 )
+
+# Lint before you trust it: a broad/self-contradictory ruleset must block.
+findings = lint_rules(protocol.scope_rules, protocol.allowed_action_types)
+assert not any(f.severity in (Severity.ERROR, Severity.WARN) for f in findings), \
+    "scope too broad to ship"
 
 # Create a bound agent
 agent = BoundAgent(
@@ -124,6 +137,7 @@ agent = BoundAgent(
 result = agent.propose_action(
     action_type="api_call",
     target="https://api.example.com/v1/search",
+    method="POST",
     params={"query": "test"},
     estimated_cost=2.50,
 )
@@ -147,8 +161,17 @@ deployment = ReferenceDeployment(
     scope_rules=[
         ScopeRule(
             action_type="api_call",
-            allowed_targets=["https://api.research.example/v1/*"],
+            allowed_targets=["https://api.research.example/v1/search",
+                              "https://api.research.example/v1/summarize"],
+            match="exact",                  # least-privilege: exact, not a catch-all prefix
+            methods=["POST"],
+            param_schema={
+                "required": ["query"],
+                "properties": {"query": {"type": "string", "maximum": 500}},
+                "additional_properties": False,
+            },
             forbidden_targets=["admin", "billing", "internal"],
+            forbid_match="token",
             max_cost=8.0,
         ),
     ],
@@ -301,10 +324,13 @@ around. Runtime enforcement stays in infrastructure, not in prompts.
 - On-chain audit — in-memory simulation. Same interface. Swap in real chain events in production.
 
 **To make it production:**
+- Run rules through `lint_rules()` in CI — fail the deploy on any ERROR/WARN (catch-all prefix, missing method/param binding, no per-rule cap, self-contradiction)
+- Operate the `GuardService` (HTTP/CLI) so the agent calls the gate and can't widen its own scope
 - Replace the simulated on-chain layer with real ERC-5192 or ERC-8004 on Ethereum or an L2
+- For real USDC settlement: `pip install eth_account`, load a funded key out-of-band, set `RealWallet(live=True)` + `SafeSpendAgent(live=True)`
 - Connect the insurance interface to a real insurer's claims process
 - Wire it to a real LLM (OpenAI, Anthropic, local model)
-- Add the specific scope rules, budget, and approval thresholds for your use case
+- Set the specific scope rules, budget, and approval thresholds for your use case
 
 ---
 
@@ -386,6 +412,13 @@ The safe-payment product (`SafeSpendAgent`) works end-to-end behind a real 402/x
 The scope layer is least-privilege (five bindings, enforced) and ships with a linter (`lint_rules`) that blocks broad rules before deploy.
 
 The guard surface (`GuardService` + `cli.py`) turns the framework into a runnable service: a user-controlled, linted-on-load config, an HTTP/CLI boundary the agent cannot widen, and fail-closed startup.
+
+**What you get in this repo:**
+- `SafetyProtocol` — the enforcement layer (scope, budget, approval, audit, kill switch), deny-by-default
+- `ScopeRule` + `lint_rules()` — least-privilege rules (five bindings) and a linter that **fails closed** on broad/self-contradictory rules
+- `SafeSpendAgent` + `RealWallet` — x402/USDC payment guard; the wallet only signs what the gate cleared (production EIP-3009 path, gated behind `LIVE=True`)
+- `GuardService` + `cli.py` — HTTP/CLI guard a real agent calls; the agent sends intents, never edits rules
+- Examples: `llm_agent`, `reference_deployment`, `scope_test` (29 assertions), `scope_lint_demo`, `safe_spend_demo` (+ `mock_merchant`), `settlement_demo`, `agent_client`, `guard_config.json`
 
 Use it as a reference architecture. Wire it to your LLM, your chain, your insurer. Adapt the scope rules, budget, and thresholds to your use case.
 
