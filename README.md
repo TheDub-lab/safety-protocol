@@ -8,6 +8,8 @@ This framework provides the enforcement layer. The agent operates freely **withi
 
 When the agent messes up, the audit trail tells you what happened, the binding tells you who's accountable, and the next iteration has tighter scope. That's the model.
 
+**The one thing that makes the rest real:** scope has to be *least-privilege and fail-closed*, or the other controls are decorative. A broad allowlist (a `prefix` on `/v1/`) lets the agent hit `/v1/admin` and `/v1/delete-everything` — so budget, approval, and kill-switch all sit inside a loose perimeter and mean nothing. This project enforces scope on **five** bindings (action type, target, method, params, per-action cap), ships a **linter that fails closed** (a broad or self-contradictory rule means the guard refuses to start), and runs as a **guard** the agent calls over HTTP/CLI — the agent can only send intents, never widen its own scope.
+
 ---
 
 ## The problem
