@@ -1,0 +1,287 @@
+"""
+Core types and data structures for the safety protocol framework.
+"""
+
+from __future__ import annotations
+import time
+import uuid
+import enum
+import json
+import hashlib
+from dataclasses import dataclass, field
+from typing import Any
+from datetime import datetime, timezone
+
+
+# ---------------------------------------------------------------------------
+# Core types
+# ---------------------------------------------------------------------------
+
+class ActionOutcome(enum.Enum):
+    """The outcome of an action request through the safety protocol."""
+    ALLOWED = "allowed"
+    BLOCKED_SCOPE = "blocked_scope"
+    BLOCKED_BUDGET = "blocked_budget"
+    PENDING_APPROVAL = "pending_approval"
+    BLOCKED_KILLSWITCH = "blocked_killswitch"
+
+
+class ProtocolState(enum.Enum):
+    """The state of the safety protocol."""
+    ACTIVE = "active"
+    FROZEN = "frozen"       # kill switch engaged, all actions blocked
+    REVOKED = "revoked"     # binding revoked, agent can't act at all
+
+
+@dataclass
+class ActionRequest:
+    """What the agent wants to do."""
+    action_type: str          # e.g. "api_call", "spend", "write_file", "send_message"
+    target: str              # what it's acting on
+    params: dict = field(default_factory=dict)
+    estimated_cost: float = 0.0
+    urgency: str = "normal"  # "low", "normal", "high", "critical"
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class ActionResult:
+    """Outcome of an action request."""
+    request_id: str
+    outcome: ActionOutcome
+    block_reason: str | None = None
+    requires_approval_for: str | None = None  # if PENDING_APPROVAL
+    executed: bool = False
+    execution_log: dict = field(default_factory=dict)
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class ApprovalRecord:
+    """A human approval decision."""
+    request_id: str
+    approved: bool
+    approver: str
+    reason: str | None = None
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class ScopeRule:
+    """A single scope boundary.
+
+    Multiple rules can be combined. Rules are evaluated in order —
+    first match wins. Use allowed_targets for positive allowlists,
+    forbidden_targets for pattern-based blocking.
+    """
+    action_type: str | None = None   # None = applies to all types
+    allowed_targets: list[str] | None = None   # exact match allowlist
+    forbidden_targets: list[str] | None = None  # blocked substring patterns
+    max_cost: float | None = None      # per-action cost cap
+    requires_approval: bool = False   # this type always needs approval
+    allow_subactions: bool = True     # can this spawn sub-agents?
+
+
+# ---------------------------------------------------------------------------
+# Audit trail — immutable, append-only
+# ---------------------------------------------------------------------------
+
+class AuditTrail:
+    """
+    Immutable append-only log. Every event is hashed into a chain so
+    tampering is detectable.
+
+    This is the "blockchain-like" property without requiring an actual
+    chain — the trust is in the integrity of the record. You can verify
+    the chain is intact at any time.
+    """
+
+    def __init__(self):
+        self._entries: list[dict] = []
+        self._head_hash: str | None = None
+
+    def append(self, event_type: str, agent_id: str, data: dict) -> str:
+        """Append an event and return its hash."""
+        entry = {
+            "seq": len(self._entries),
+            "event_type": event_type,
+            "agent_id": agent_id,
+            "data": data,
+            "timestamp": time.time(),
+            "prev_hash": self._head_hash,
+        }
+        entry["entry_hash"] = self._hash_entry(entry)
+        self._entries.append(entry)
+        self._head_hash = entry["entry_hash"]
+        return entry["entry_hash"]
+
+    def _hash_entry(self, entry: dict) -> str:
+        raw = json.dumps({
+            "seq": entry["seq"],
+            "event_type": entry["event_type"],
+            "agent_id": entry["agent_id"],
+            "data": entry["data"],
+            "timestamp": entry["timestamp"],
+            "prev_hash": entry["prev_hash"],
+        }, sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def verify_integrity(self) -> list[str]:
+        """Return list of broken sequence numbers, empty if intact."""
+        broken = []
+        prev = None
+        for e in self._entries:
+            if e["prev_hash"] != prev:
+                broken.append(e["seq"])
+            prev = e["entry_hash"]
+        return broken
+
+    def query(
+        self,
+        agent_id: str | None = None,
+        event_types: list[str] | None = None,
+    ) -> list[dict]:
+        """Query events by agent or type."""
+        out = self._entries
+        if agent_id:
+            out = [e for e in out if e["agent_id"] == agent_id]
+        if event_types:
+            out = [e for e in out if e["event_type"] in event_types]
+        return list(out)
+
+    def get_full_history(self, agent_id: str) -> list[dict]:
+        """Get all events for an agent."""
+        return self.query(agent_id=agent_id)
+
+    def reconstruct_sequence(self, agent_id: str) -> str:
+        """Human-readable reconstruction of everything that happened."""
+        entries = self.get_full_history(agent_id)
+        lines = [f"=== Audit Trail: Agent {agent_id} ==="]
+        lines.append(f"Total events: {len(entries)}")
+        lines.append("")
+        for e in entries:
+            dt = datetime.fromtimestamp(e["timestamp"], timezone.utc)
+            lines.append(f"[{dt.isoformat()}] {e['event_type']}")
+            for k, v in e["data"].items():
+                lines.append(f"    {k}: {v}")
+            lines.append(f"    hash: {e['entry_hash']} (prev: {e['prev_hash']})")
+            lines.append("")
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Monitor — real-time visibility
+# ---------------------------------------------------------------------------
+
+class Monitor:
+    """
+    Emits events as the agent operates.
+
+    Provides live state queries and anomaly detection hooks. Register
+    callbacks to react to anomalies — blocked actions, critical actions
+    not immediately allowed, cost spikes.
+    """
+
+    def __init__(self, audit: AuditTrail, agent_id: str):
+        self.audit = audit
+        self.agent_id = agent_id
+        self.action_count = 0
+        self.allowed_count = 0
+        self.blocked_count = 0
+        self.approval_pending = 0
+        self.total_cost = 0.0
+        self.last_action_time: float | None = None
+        self.alert_callbacks: list[callable] = []
+        self._start_time = time.time()
+
+    def register_alert(self, cb: callable):
+        """Register a callback for anomaly alerts."""
+        self.alert_callbacks.append(cb)
+
+    def record_action(self, result: ActionResult, request: ActionRequest):
+        """Record an action outcome and check for anomalies."""
+        self.action_count += 1
+        self.last_action_time = time.time()
+
+        if result.outcome == ActionOutcome.ALLOWED:
+            self.allowed_count += 1
+            self.total_cost += request.estimated_cost
+            self.audit.append("action_allowed", self.agent_id, {
+                "request_id": result.request_id,
+                "action_type": request.action_type,
+                "target": request.target,
+                "cost": request.estimated_cost,
+            })
+        elif result.outcome == ActionOutcome.PENDING_APPROVAL:
+            self.approval_pending += 1
+            self.audit.append("action_pending_approval", self.agent_id, {
+                "request_id": result.request_id,
+                "action_type": request.action_type,
+                "target": request.target,
+                "requires_approval_for": result.requires_approval_for,
+            })
+        else:
+            self.blocked_count += 1
+            self.audit.append("action_blocked", self.agent_id, {
+                "request_id": result.request_id,
+                "action_type": request.action_type,
+                "target": request.target,
+                "reason": result.block_reason,
+            })
+
+        self._check_anomalies(result, request)
+
+    def _check_anomalies(self, result: ActionResult, request: ActionRequest):
+        """Check for anomalies and fire alert callbacks."""
+        alerts: list[str] = []
+
+        if result.outcome != ActionOutcome.ALLOWED:
+            alerts.append(f"Action blocked: {result.block_reason}")
+
+        if request.urgency == "critical" and result.outcome != ActionOutcome.ALLOWED:
+            alerts.append("CRITICAL action was not immediately allowed")
+
+        if request.estimated_cost > 0 and self.total_cost > 0:
+            projected = self.total_cost + request.estimated_cost
+            ratio = projected / max(self.total_cost, 1)
+            if ratio > 2.0:
+                alerts.append(
+                    f"Single action cost ${request.estimated_cost:.2f} is >2x "
+                    f"total prior spend (${self.total_cost:.2f})"
+                )
+
+        for alert in alerts:
+            for cb in self.alert_callbacks:
+                try:
+                    cb(alert)
+                except Exception:
+                    pass  # don't let alert failures break the protocol
+
+    def get_status(self) -> dict:
+        """Get current monitor status."""
+        return {
+            "agent_id": self.agent_id,
+            "action_count": self.action_count,
+            "allowed": self.allowed_count,
+            "blocked": self.blocked_count,
+            "approval_pending": self.approval_pending,
+            "total_cost": self.total_cost,
+            "last_action": self.last_action_time,
+            "uptime_seconds": time.time() - self._start_time,
+        }
+
+    def snapshot(self) -> str:
+        """Human-readable status snapshot."""
+        s = self.get_status()
+        lines = [
+            f"=== Live Monitor: Agent {self.agent_id} ===",
+            f"Actions: {s['action_count']} total  "
+            f"(allowed: {s['allowed']}, blocked: {s['blocked']}, "
+            f"pending approval: {s['approval_pending']})",
+            f"Total cost incurred: ${s['total_cost']:.2f}",
+            f"Uptime: {s['uptime_seconds']:.0f}s",
+            f"Last action: {datetime.fromtimestamp(s['last_action'], tz=timezone.utc).isoformat() if s['last_action'] else 'none'}",
+            "",
+        ]
+        return "\n".join(lines)
