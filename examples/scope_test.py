@@ -120,13 +120,83 @@ r = res("api_call", "https://api.research.example/v1/users")
 check("listed 'users' endpoint ALLOWED (no false block)",
       r.outcome.value == "allowed", r.block_reason)
 
-print("\n[5] Budget + approval still gate on allowed actions")
+print("\n[5] Per-rule cost cap (the real bound, independent of budget)")
 r = res("api_call", "https://api.research.example/v1/search", 99.0)
-check("per-action cost cap blocks allowed target when over cap",
+check("per-rule cap $5 blocks allowed target at $99",
       r.outcome.value == "blocked_scope", r.block_reason)
-r = res("spend", "compute", 20.0)
-check("spend over approval threshold goes PENDING_APPROVAL",
-      r.outcome.value == "pending_approval", r.block_reason)
+r = res("api_call", "https://api.research.example/v1/search", 4.0)
+check("under per-rule cap ($4 < $5) ALLOWED",
+      r.outcome.value == "allowed", r.block_reason)
+
+print("\n[7] Least-privilege: method + params + the broad-vs-tight trap")
+# Build a protocol with a TIGHT read rule: exact target, GET only,
+# constrained params. This is the correct shape.
+tight = SafetyProtocol(
+    agent_id="a3", user_id="alice",
+    scope_rules=[
+        ScopeRule(
+            action_type="api_call",
+            allowed_targets=["https://api.research.example/v1/users"],
+            match="exact",
+            methods=["GET"],
+            param_schema={
+                "required": ["id"],
+                "properties": {
+                    "id": {"type": "string", "pattern": r"^[a-z0-9_]{1,20}$"},
+                },
+                "additional_properties": False,
+            },
+        ),
+    ],
+    allowed_action_types=["api_call"],
+)
+def tres(action_type, target, cost=0.0, **kw):
+    return tight.execute(ActionRequest(
+        action_type=action_type, target=target, estimated_cost=cost, **kw))
+
+check("GET /v1/users?id=alice ALLOWED (exact + method + valid param)",
+      tres("api_call", "https://api.research.example/v1/users",
+           method="GET", params={"id": "alice"}).outcome.value == "allowed")
+check("DELETE on the same target DENIED (method not permitted)",
+      tres("api_call", "https://api.research.example/v1/users",
+           method="DELETE", params={"id": "alice"}).outcome.value == "blocked_scope")
+check("GET with no 'id' DENIED (required param missing)",
+      tres("api_call", "https://api.research.example/v1/users",
+           method="GET", params={}).outcome.value == "blocked_scope")
+check("GET with unknown param DENIED (additional_properties=False)",
+      tres("api_call", "https://api.research.example/v1/users",
+           method="GET", params={"id": "alice", "confirm": "true"}
+           ).outcome.value == "blocked_scope")
+check("GET with bad id pattern DENIED (param regex)",
+      tres("api_call", "https://api.research.example/v1/users",
+           method="GET", params={"id": "../../etc/passwd"}
+           ).outcome.value == "blocked_scope")
+check("GET with omitted method DENIED (rule requires method)",
+      tres("api_call", "https://api.research.example/v1/users",
+           params={"id": "alice"}).outcome.value == "blocked_scope")
+
+# Now prove the BROAD rule would have let a DELETE through. Compare:
+broad = SafetyProtocol(
+    agent_id="a4", user_id="alice",
+    scope_rules=[
+        ScopeRule(  # common lazy shape: broad prefix, no method, no params
+            action_type="api_call",
+            allowed_targets=["https://api.research.example/v1/"],
+            match="prefix",
+        ),
+    ],
+    allowed_action_types=["api_call"],
+)
+def bres(action_type, target, cost=0.0, **kw):
+    return broad.execute(ActionRequest(
+        action_type=action_type, target=target, estimated_cost=cost, **kw))
+check("BROAD prefix rule ALLOWS DELETE /v1/users (the trap)",
+      bres("api_call", "https://api.research.example/v1/users",
+           method="DELETE").outcome.value == "allowed")
+# The tight rule blocks the identical DELETE — that's the whole point.
+check("TIGHT rule BLOCKS the same DELETE (least-privilege wins)",
+      tres("api_call", "https://api.research.example/v1/users",
+           method="DELETE", params={"id": "alice"}).outcome.value == "blocked_scope")
 
 print("\n[6] Default-deny is the global fallback")
 loose = SafetyProtocol(

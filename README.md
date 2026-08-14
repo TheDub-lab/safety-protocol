@@ -263,8 +263,18 @@ Three properties make scope real, not decorative:
 2. **Closed action vocabulary.** You name the verbs the agent may use (`api_call`, `spend`, `send_message`). An action whose type isn't in that set is blocked before any rule is consulted — so the model can't invent `internal_transfer` or `spawn_subagent_v2` to slip past the rules.
 3. **Precise target matching.** Forbidden targets use token matching: `admin` blocks `/api/admin` and `?role=admin`, but not `readmymind` or `administrator` (whole-token, no false positives). Allowlists use prefix/glob/exact/regex, and targets are normalized (casing, repeated slashes) so `HTTPS://API.X/V1/Users` and `https://api.x/v1/users` are the same.
 
+**A broad allowlist makes the other controls decorative.** The trap: `allowed_targets=["https://api.x/v1/"]` with `match="prefix"` looks scoped, but it also permits `/v1/admin` and `/v1/delete-everything`. A rule must bind **five** things to be least-privilege:
+
+- **action_type** — from the closed vocabulary (above).
+- **target** — exact or narrow prefix/glob, never a catch-all prefix.
+- **method** — only the HTTP verb the rule means (`GET`, not `GET`+`DELETE`).
+- **params** — a JSON-schema-style `param_schema` the params MUST satisfy (required keys, types, enums, ranges). `?confirm=true` can't slip through an "allowed" endpoint.
+- **max_cost** — a per-rule spend cap, the real bound (the global budget only catches volume, not a single oversized action).
+
 ```bash
-python examples/scope_test.py   # 21 assertions: deny-by-default, vocabulary, token matching
+python examples/scope_test.py   # 29 assertions: deny-by-default, vocabulary,
+                                 # token matching, method + param binding,
+                                 # and the broad-prefix-vs-tight-rule trap
 ```
 
 ---

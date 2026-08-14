@@ -37,6 +37,15 @@ def build_protocol() -> SafetyProtocol:
                 action_type="payment",
                 allowed_targets=[TRUSTED_MERCHANT],
                 match="exact",
+                methods=["x402"],                  # only the x402 payment rail
+                param_schema={
+                    "required": ["resource"],
+                    "properties": {
+                        "resource": {"type": "string", "enum": ["weather"]},
+                        "memo": {"type": "string", "maximum": 280},
+                    },
+                    "additional_properties": False,
+                },
                 forbidden_targets=["evil", "scam", "rug"],
                 forbid_match="token",
                 max_cost=1.00,           # per-payment cap: $1.00
@@ -102,8 +111,15 @@ def main():
         r2 = agent.direct_pay(TRUSTED_MERCHANT, 0.75)
         print(f"  post-approval outcome: {r2.outcome}")
 
-    # --- Case 5: kill switch — nothing pays after
-    banner("CASE 5 — Kill switch engaged — all payments BLOCKED")
+    # --- Case 6: param binding violation (wrong resource) — blocked
+    banner("CASE 6 — Param violation (resource='stock_tip' not in enum) — BLOCKED")
+    r = agent.direct_pay(TRUSTED_MERCHANT, 0.10, resource="stock_tip")
+    print(f"  outcome:    {r.outcome}")
+    print(f"  reason:     {r.reason}")
+    print(f"  signed?     {'YES (BAD)' if r.envelope else 'no (correct)'}")
+
+    # --- Case 7: kill switch — nothing pays after
+    banner("CASE 7 — Kill switch engaged — all payments BLOCKED")
     protocol.engage_killswitch("User froze the agent")
     r = agent.pay(MERCHANT_URL, recipient=TRUSTED_MERCHANT)
     print(f"  outcome:    {r.outcome}")

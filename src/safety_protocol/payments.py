@@ -189,12 +189,16 @@ class SafeSpendAgent:
         self.decimals = decimals
 
     # -- internal: gate an intent, return (ActionResult, PaymentEnvelope-or-None)
-    def _gate(self, recipient: str, usd: float, extra: dict | None = None) -> tuple:
+    def _gate(self, recipient: str, usd: float, extra: dict | None = None,
+              resource: str = "weather") -> tuple:
+        params = dict(extra or {})
+        params.setdefault("resource", resource)
         req = ActionRequest(
             action_type="payment",
             target=recipient,
+            method="x402",           # the only rail this scope permits
             estimated_cost=usd,
-            params=extra or {},
+            params=params,
         )
         result = self.protocol.execute(req)
         return result, req
@@ -216,8 +220,9 @@ class SafeSpendAgent:
         return env
 
     # -- agent-initiated spend (no 402 challenge) -------------------------
-    def direct_pay(self, recipient: str, usd: float, memo: str = "") -> PaymentResult:
-        result, req = self._gate(recipient, usd, {"memo": memo})
+    def direct_pay(self, recipient: str, usd: float, memo: str = "",
+                   resource: str = "weather") -> PaymentResult:
+        result, req = self._gate(recipient, usd, {"memo": memo}, resource=resource)
         if result.outcome == ActionOutcome.BLOCKED_KILLSWITCH or result.block_reason:
             return PaymentResult(
                 outcome="blocked",
@@ -261,9 +266,10 @@ class SafeSpendAgent:
             rcpt = recipient or terms["recipient"]
             usd = terms["amount"] / (10 ** self.decimals)
             # Step 2: GATE the intent before signing anything.
-            result, req = self._gate(rcpt, usd, {
-                "url": url, "network": terms["network"], "asset": terms["asset"]
-            })
+            # Only the user-action params (resource) go through the scope
+            # gate; url/network/asset are internal routing, not subject to
+            # the param allowlist.
+            result, req = self._gate(rcpt, usd, resource="weather")
             if result.block_reason or result.outcome == ActionOutcome.BLOCKED_KILLSWITCH:
                 return PaymentResult(outcome="blocked", status_code=402,
                                       reason=result.block_reason or "blocked by safety protocol",

@@ -26,6 +26,7 @@ from .core import (
     AuditTrail,
     Monitor,
     target_matches,
+    validate_params,
 )
 
 
@@ -185,6 +186,9 @@ class SafetyProtocol:
 
         # Collect whether any rule explicitly permits this target.
         permitted = False
+        # Track the tightest per-rule cost cap among rules that apply to
+        # this action_type (used after permission is established).
+        per_rule_caps: list[float] = []
         for rule in self.scope_rules:
             if rule.action_type is not None and request.action_type != rule.action_type:
                 continue
@@ -202,6 +206,29 @@ class SafetyProtocol:
             if rule.allowed_targets is not None:
                 if any(target_matches(p, request.target, rule.match)
                        for p in rule.allowed_targets):
+                    # This rule permits the target. Now bind the OTHER
+                    # dimensions of least-privilege — any one being broad
+                    # makes the permission deceptive, so check them here.
+                    if rule.methods is not None and request.method is not None:
+                        if request.method.upper() not in [m.upper() for m in rule.methods]:
+                            return (
+                                f"Method {request.method} not permitted for "
+                                f"'{request.target}' — allowed: {rule.methods}"
+                            )
+                    if request.method is None and rule.methods is not None:
+                        return (
+                            f"Action omits HTTP method; rule requires one of "
+                            f"{rule.methods} for '{request.target}'"
+                        )
+                    if rule.param_schema is not None:
+                        reason = validate_params(request.params, rule.param_schema)
+                        if reason:
+                            return (
+                                f"Params violate scope rule for "
+                                f"'{request.target}': {reason}"
+                            )
+                    if rule.max_cost is not None:
+                        per_rule_caps.append(rule.max_cost)
                     permitted = True
                 # If this rule carries an allowlist and the target hit none,
                 # the rule does NOT permit it. We don't deny here because a
@@ -211,7 +238,21 @@ class SafetyProtocol:
 
             # A rule with action_type match and no allowed_targets is a
             # blanket allowance for that verb (e.g. allow all "read_file").
-            # Rare; explicit allowlists are preferred.
+            # Rare; explicit allowlists are preferred. Still bind method/params.
+            if rule.methods is not None and request.method is not None:
+                if request.method.upper() not in [m.upper() for m in rule.methods]:
+                    return (
+                        f"Method {request.method} not permitted for verb "
+                        f"'{request.action_type}' — allowed: {rule.methods}"
+                    )
+            if rule.param_schema is not None:
+                reason = validate_params(request.params, rule.param_schema)
+                if reason:
+                    return (
+                        f"Params violate scope rule for '{request.action_type}': {reason}"
+                    )
+            if rule.max_cost is not None:
+                per_rule_caps.append(rule.max_cost)
             permitted = True
 
         if not permitted:
@@ -221,14 +262,14 @@ class SafetyProtocol:
                 f"(scope is an allowlist, not a blocklist)"
             )
 
-        # max_cost per-action cap (only reached if permitted)
-        for rule in self.scope_rules:
-            if rule.action_type is not None and request.action_type != rule.action_type:
-                continue
-            if rule.max_cost is not None and request.estimated_cost > rule.max_cost:
+        # Per-rule cost cap (tightest wins) — the real bound, independent
+        # of the global budget (which only catches volume).
+        if per_rule_caps:
+            tightest = min(per_rule_caps)
+            if request.estimated_cost > tightest:
                 return (
                     f"Action cost ${request.estimated_cost:.2f} exceeds "
-                    f"per-action cap ${rule.max_cost:.2f}"
+                    f"per-rule cap ${tightest:.2f}"
                 )
 
         if request.action_type == "spawn_subagent" and not all(

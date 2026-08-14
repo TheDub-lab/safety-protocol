@@ -40,6 +40,7 @@ class ActionRequest:
     action_type: str          # e.g. "api_call", "spend", "write_file", "send_message"
     target: str              # what it's acting on
     params: dict = field(default_factory=dict)
+    method: str | None = None  # HTTP/transport verb (GET, POST, DELETE, …)
     estimated_cost: float = 0.0
     urgency: str = "normal"  # "low", "normal", "high", "critical"
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
@@ -95,6 +96,62 @@ def normalize_target(target: str) -> str:
     return t
 
 
+def validate_params(params: dict, schema: dict) -> str | None:
+    """Validate `params` against a JSON-schema-style `schema`.
+
+    Subset supported (enough for least-privilege param binding):
+      - "required": [keys] that must be present
+      - "properties": { key: {type, enum, minimum, maximum, pattern} }
+      - "additional_properties": bool (default False — reject unknown keys)
+
+    Returns None if valid, or a human-readable reason string if not.
+    This is the param half of least-privilege: a rule that allows a
+    target but ignores params is still broad — the agent can pass
+    ?confirm=true or a wildcard id and do something the rule didn't mean.
+    """
+    if schema is None:
+        return None
+
+    props = schema.get("properties", {})
+    required = schema.get("required", [])
+    additional = schema.get("additional_properties", False)
+
+    # Unknown keys
+    if not additional:
+        for k in params:
+            if k not in props:
+                return f"param '{k}' is not permitted by this scope rule"
+
+    # Required keys
+    for k in required:
+        if k not in params:
+            return f"required param '{k}' is missing"
+
+    # Per-property checks
+    for k, spec in props.items():
+        if k not in params:
+            continue
+        v = params[k]
+        t = spec.get("type")
+        if t == "string" and not isinstance(v, str):
+            return f"param '{k}' must be a string"
+        if t == "number" and not isinstance(v, (int, float)):
+            return f"param '{k}' must be a number"
+        if t == "integer" and not isinstance(v, int):
+            return f"param '{k}' must be an integer"
+        if t == "boolean" and not isinstance(v, bool):
+            return f"param '{k}' must be a boolean"
+        if "enum" in spec and v not in spec["enum"]:
+            return f"param '{k}'={v!r} not in allowed set {spec['enum']}"
+        if "minimum" in spec and isinstance(v, (int, float)) and v < spec["minimum"]:
+            return f"param '{k}'={v} below minimum {spec['minimum']}"
+        if "maximum" in spec and isinstance(v, (int, float)) and v > spec["maximum"]:
+            return f"param '{k}'={v} above maximum {spec['maximum']}"
+        if "pattern" in spec and isinstance(v, str) and not re.fullmatch(spec["pattern"], v):
+            return f"param '{k}'={v!r} fails pattern {spec['pattern']}"
+    return None
+
+
 def target_matches(pattern: str, target: str, kind: str) -> bool:
     """Return True if `target` matches `pattern` under `kind` matching."""
     kind = MatchKind(kind) if not isinstance(kind, MatchKind) else kind
@@ -124,28 +181,43 @@ def target_matches(pattern: str, target: str, kind: str) -> bool:
 
 @dataclass
 class ScopeRule:
-    """A single, PRECISE scope boundary.
+    """A single, PRECISE, least-privilege scope boundary.
 
     Scope is deny-by-default: an action is allowed only if a rule
-    explicitly permits it. Build rules as allowlists of exact targets,
-    not as hopes that you remembered to forbid everything dangerous.
+    explicitly permits it. Build rules as narrow allowlists, not as
+    hopes that you forbade everything dangerous.
 
-    Matching is precise:
-      - allowed_targets matched by `match` (prefix/glob/exact/regex)
-      - forbidden_targets matched by `forbid_match` (token by default —
-        catches admin/api, admin.api, role=admin, but NOT readmymind)
+    A rule binds FIVE things, every one enforced — leaving any of them
+    broad is what makes the other controls decorative:
 
-    `action_type` should come from a closed, registered vocabulary
-    (SafetyProtocol.allowed_action_types). An unregistered verb is
-    blocked regardless of rules.
+      - action_type : comes from a closed vocabulary (SafetyProtocol.
+                       allowed_action_types). An unregistered verb is
+                       blocked before any rule is consulted.
+      - allowed_targets + match : where the action may hit. Use EXACT or
+                       narrow PREFIX/GLOB/REGEX — a broad prefix like
+                       /v1/ lets /v1/admin and /v1/delete slip through.
+      - methods : which HTTP/transport verbs are permitted (GET, POST, …).
+                  A read rule that also permits DELETE is not least-privilege.
+      - param_schema : a JSON-schema-style dict the params MUST satisfy
+                       (required keys, types, enum/range constraints).
+                       Unvalidated params are how a "safe" endpoint does
+                       unsafe things (e.g. ?confirm=true wipes data).
+      - max_cost : a PER-RULE spend cap, independent of the global budget.
+                   This is the real bound — the global budget only catches
+                   volume, not a single oversized action.
+
+    forbidden_targets (+ forbid_match, token by default) still reject
+    specific dangerous tokens regardless of the allowlist.
     """
     action_type: str | None = None   # None = applies to all types
     allowed_targets: list[str] | None = None   # permit only these (match kind)
     forbidden_targets: list[str] | None = None  # deny these (forbid_match kind)
     match: str = "prefix"            # MatchKind for allowed_targets
     forbid_match: str = "token"      # MatchKind for forbidden_targets
-    max_cost: float | None = None    # per-action cost cap
-    requires_approval: bool = False  # this type always needs approval
+    methods: list[str] | None = None  # allowed HTTP verbs (None = any)
+    param_schema: dict | None = None  # JSON-schema-style constraint on params
+    max_cost: float | None = None    # PER-RULE cost cap (tightest wins)
+    requires_approval: bool = False  # this rule always needs approval
     allow_subactions: bool = True    # can this spawn sub-agents?
 
 

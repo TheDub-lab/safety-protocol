@@ -293,7 +293,15 @@ def run_example():
                     "https://api.research.example/v1/search",
                     "https://api.research.example/v1/summarize",
                 ],
-                match="prefix",
+                match="exact",                      # not a broad prefix
+                methods=["POST"],                   # only the verb it should use
+                param_schema={
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "maximum": 200},
+                    },
+                    "additional_properties": False,
+                },
                 forbidden_targets=["admin", "billing", "production", "internal", "config"],
                 forbid_match="token",
                 max_cost=5.0,
@@ -302,12 +310,30 @@ def run_example():
             ScopeRule(
                 action_type="spend",
                 allowed_targets=["compute", "storage"],
+                methods=["spend"],
+                param_schema={
+                    "required": ["resource", "hours"],
+                    "properties": {
+                        "resource": {"type": "string", "enum": ["compute", "storage"]},
+                        "hours": {"type": "number", "minimum": 0, "maximum": 8},
+                    },
+                    "additional_properties": False,
+                },
                 max_cost=20.0,
                 requires_approval=True,
             ),
             ScopeRule(
                 action_type="send_message",
                 allowed_targets=["alice", "team-channel"],
+                methods=["send_message"],
+                param_schema={
+                    "required": ["channel", "body"],
+                    "properties": {
+                        "channel": {"type": "string", "enum": ["alice", "team-channel"]},
+                        "body": {"type": "string", "maximum": 1000},
+                    },
+                    "additional_properties": False,
+                },
                 max_cost=0.0,
                 requires_approval=False,
             ),

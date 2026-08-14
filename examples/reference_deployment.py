@@ -38,19 +38,45 @@ def run():
                     "https://api.research.example/v1/summarize",
                     "https://api.research.example/v1/analyze",
                 ],
-                match="prefix",
+                match="exact",                      # deny-by-default, exact targets
+                methods=["POST"],                   # only the verb it should use
+                param_schema={
+                    "required": ["query"],
+                    "properties": {
+                        "query": {"type": "string", "maximum": 500},
+                    },
+                    "additional_properties": False,
+                },
                 forbidden_targets=["admin", "billing", "internal", "config", "production"],
                 forbid_match="token",
-                max_cost=8.0,
+                max_cost=8.0,                        # per-rule hard cap
             ),
             ScopeRule(
                 action_type="spend",
                 allowed_targets=["compute", "storage", "api_credits"],
+                methods=["spend"],
+                param_schema={
+                    "required": ["resource", "amount"],
+                    "properties": {
+                        "resource": {"type": "string", "enum": ["compute", "storage", "api_credits"]},
+                        "amount": {"type": "number", "minimum": 0, "maximum": 30},
+                    },
+                    "additional_properties": False,
+                },
                 max_cost=25.0,
             ),
             ScopeRule(
                 action_type="send_message",
                 allowed_targets=["alice", "team-channel"],
+                methods=["send_message"],
+                param_schema={
+                    "required": ["channel", "body"],
+                    "properties": {
+                        "channel": {"type": "string", "enum": ["alice", "team-channel"]},
+                        "body": {"type": "string", "maximum": 1000},
+                    },
+                    "additional_properties": False,
+                },
             ),
         ],
         budget_limit=100.0,
@@ -150,6 +176,9 @@ def run():
         ("api_call", "https://api.example.com/admin/config", {"debug": True}, 1.0, "high"),
         ("api_call", "https://api.example.com/billing/charges", {}, 0.5, "normal"),
         ("api_call", "https://api.example.com/internal/deploy", {}, 2.0, "critical"),
+        # The trap: a broad prefix rule would have ALLOWED this DELETE on a
+        # permitted-looking path. Our tight rule blocks it on method alone.
+        ("api_call", "https://api.research.example/v1/search", {"query": "x"}, 0.5, "normal"),
     ]
 
     for i, (action_type, target, params, cost, urgency) in enumerate(violations, 1):
