@@ -4,6 +4,7 @@ Core types and data structures for the safety protocol framework.
 
 from __future__ import annotations
 import time
+import re
 import uuid
 import enum
 import json
@@ -67,20 +68,85 @@ class ApprovalRecord:
     timestamp: float = field(default_factory=time.time)
 
 
+class MatchKind(enum.Enum):
+    """How a target pattern is compared against an action target."""
+    EXACT = "exact"        # target == pattern (after normalization)
+    PREFIX = "prefix"      # target starts with pattern (URL/base-path safe)
+    GLOB = "glob"          # fnmatch: "https://api.x/v1/*" matches subpaths
+    REGEX = "regex"        # re.fullmatch against normalized target
+    TOKEN = "token"        # forbidden only: blocks if pattern is a full
+                           # path/label token (api/admin, admin.api, role=admin)
+                           # but NOT readmymind / administrator
+    SUBSTRING = "substring"  # forbidden only: raw containment (legacy, loose)
+
+
+def normalize_target(target: str) -> str:
+    """Normalize a target for comparison.
+
+    Lowercases, collapses repeated slashes, strips a trailing slash.
+    This makes HTTPS://API.X/V1/Users and https://api.x/v1/users the
+    same target — so casing/encoding tricks can't slip past the allowlist.
+    """
+    t = target.strip().lower()
+    # Collapse repeated slashes, but preserve the "://" of a scheme
+    # (e.g. https:// must stay https://, not https:/).
+    t = re.sub(r"(?<!:)//+", "/", t)
+    t = t.rstrip("/")
+    return t
+
+
+def target_matches(pattern: str, target: str, kind: str) -> bool:
+    """Return True if `target` matches `pattern` under `kind` matching."""
+    kind = MatchKind(kind) if not isinstance(kind, MatchKind) else kind
+    tn = normalize_target(target)
+    pn = normalize_target(pattern)
+
+    if kind == MatchKind.EXACT:
+        return tn == pn
+    if kind == MatchKind.PREFIX:
+        return tn == pn or tn.startswith(pn + "/")
+    if kind == MatchKind.GLOB:
+        import fnmatch
+        return fnmatch.fnmatch(tn, pn)
+    if kind == MatchKind.REGEX:
+        return re.fullmatch(pn, tn) is not None
+    if kind == MatchKind.TOKEN:
+        # Split into segment tokens on common delimiters; block only if the
+        # pattern equals a whole token exactly. 'admin' blocks /api/admin and
+        # role=admin, but NOT readmymind, administrator, or radmin — token
+        # containment within a word is a false positive we explicitly avoid.
+        tokens = re.split(r"[/.?#&=+_\-]", tn)
+        return pattern.lower() in tokens
+    if kind == MatchKind.SUBSTRING:
+        return pattern.lower() in tn
+    return False
+
+
 @dataclass
 class ScopeRule:
-    """A single scope boundary.
+    """A single, PRECISE scope boundary.
 
-    Multiple rules can be combined. Rules are evaluated in order —
-    first match wins. Use allowed_targets for positive allowlists,
-    forbidden_targets for pattern-based blocking.
+    Scope is deny-by-default: an action is allowed only if a rule
+    explicitly permits it. Build rules as allowlists of exact targets,
+    not as hopes that you remembered to forbid everything dangerous.
+
+    Matching is precise:
+      - allowed_targets matched by `match` (prefix/glob/exact/regex)
+      - forbidden_targets matched by `forbid_match` (token by default —
+        catches admin/api, admin.api, role=admin, but NOT readmymind)
+
+    `action_type` should come from a closed, registered vocabulary
+    (SafetyProtocol.allowed_action_types). An unregistered verb is
+    blocked regardless of rules.
     """
     action_type: str | None = None   # None = applies to all types
-    allowed_targets: list[str] | None = None   # exact match allowlist
-    forbidden_targets: list[str] | None = None  # blocked substring patterns
-    max_cost: float | None = None      # per-action cost cap
-    requires_approval: bool = False   # this type always needs approval
-    allow_subactions: bool = True     # can this spawn sub-agents?
+    allowed_targets: list[str] | None = None   # permit only these (match kind)
+    forbidden_targets: list[str] | None = None  # deny these (forbid_match kind)
+    match: str = "prefix"            # MatchKind for allowed_targets
+    forbid_match: str = "token"      # MatchKind for forbidden_targets
+    max_cost: float | None = None    # per-action cost cap
+    requires_approval: bool = False  # this type always needs approval
+    allow_subactions: bool = True    # can this spawn sub-agents?
 
 
 # ---------------------------------------------------------------------------

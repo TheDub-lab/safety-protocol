@@ -31,7 +31,7 @@ A safety protocol that sits between the agent and the world. Every action the ag
 
 **Binding** — the agent is unambiguously tied to a user. Every action is attributable. The binding can be on-chain (SBT-style, non-transferable, verifiable by anyone).
 
-**Scope** — what the agent can and can't do, enforced at the gate. Allowed targets, forbidden patterns, action types, sub-agent spawning. The model cannot talk its way around it.
+**Scope** — what the agent can and can't do, enforced at the gate. **Deny-by-default**: an action is allowed only if a rule explicitly permits it. A closed action vocabulary (you name the verbs the agent may use) stops the model from inventing a new verb to bypass every rule. Target matching is precise — prefix / glob / exact / regex for allowlists, and token-based matching for forbidden targets (blocks `/api/admin` and `role=admin` but not `readmymind` or `administrator`). The model cannot talk its way around it.
 
 **Budget** — hard limits on spend. The protocol blocks actions that would exceed the budget. This is infrastructure, not a suggestion.
 
@@ -90,20 +90,25 @@ from safety_protocol import (
 audit = AuditTrail()
 
 # Create safety protocol with scope rules and budget
+# Scope is DENY-BY-DEFAULT: an action is allowed only if a rule permits it.
 protocol = SafetyProtocol(
     agent_id="agent-001",
     user_id="alice",
     scope_rules=[
         ScopeRule(
             action_type="api_call",
-            allowed_targets=["https://api.example.com/v1/*"],
+            allowed_targets=["https://api.example.com/v1/search",
+                              "https://api.example.com/v1/summarize"],
+            match="prefix",                 # prefix/glob/exact/regex
             forbidden_targets=["admin", "billing"],
+            forbid_match="token",           # blocks /api/admin, role=admin; not readmymind
             max_cost=5.0,
         ),
     ],
     budget_limit=50.0,
     approval_threshold_cost=10.0,
     audit=audit,
+    allowed_action_types=["api_call", "spend", "send_message"],  # closed verb vocabulary
 )
 
 # Create a bound agent
@@ -220,6 +225,22 @@ python examples/reference_deployment.py  # Full architecture end-to-end
 - A replacement for good agent design
 - A fully productionized on-chain deployment (that's up to you to wire to a real chain)
 - Insurance itself (it provides evidence to insurance, it isn't an insurer)
+
+---
+
+## Scope is the foundation — vague rules make everything else decorative
+
+The other controls (budget, approval, audit, kill switch) only matter if scope actually defines a perimeter. If scope is "block what you remembered to forbid," the model can do anything you didn't think of — and every other control is decoration.
+
+Three properties make scope real, not decorative:
+
+1. **Deny-by-default.** An action is allowed only if a rule *explicitly permits* it. No rule matches → denied. You build an allowlist of what the agent may touch, not a hope that you forbade everything dangerous.
+2. **Closed action vocabulary.** You name the verbs the agent may use (`api_call`, `spend`, `send_message`). An action whose type isn't in that set is blocked before any rule is consulted — so the model can't invent `internal_transfer` or `spawn_subagent_v2` to slip past the rules.
+3. **Precise target matching.** Forbidden targets use token matching: `admin` blocks `/api/admin` and `?role=admin`, but not `readmymind` or `administrator` (whole-token, no false positives). Allowlists use prefix/glob/exact/regex, and targets are normalized (casing, repeated slashes) so `HTTPS://API.X/V1/Users` and `https://api.x/v1/users` are the same.
+
+```bash
+python examples/scope_test.py   # 21 assertions: deny-by-default, vocabulary, token matching
+```
 
 ---
 

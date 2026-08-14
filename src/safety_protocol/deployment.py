@@ -84,6 +84,7 @@ class ReferenceDeployment:
         budget_limit=100.0,
         approval_threshold=10.0,
         high_value_threshold=25.0,
+        allowed_action_types=None,
     ):
         """
         Initialize the full reference deployment.
@@ -97,6 +98,7 @@ class ReferenceDeployment:
             budget_limit: Maximum total spend
             approval_threshold: Actions above this cost need approval
             high_value_threshold: Actions above this are recorded on-chain
+            allowed_action_types: Closed vocabulary of permitted action verbs
         """
         # Layer 2: On-chain anchors
         self.on_chain_registry = OnChainBindingRegistry()
@@ -110,6 +112,7 @@ class ReferenceDeployment:
             scope_rules=scope_rules,
             budget_limit=budget_limit,
             approval_threshold_cost=approval_threshold,
+            allowed_action_types=allowed_action_types,
         )
 
         # Dual audit: off-chain complete + on-chain verifiable
@@ -264,7 +267,7 @@ class ReferenceDeployment:
 
     def approve_action(self, token: str, reason: str | None = None) -> bool:
         """Human approves a pending action."""
-        return self.protocol.decide_approval(
+        return self.protocol.protocol.decide_approval(
             token=token,
             approved=True,
             approver=self.user_id,
@@ -273,7 +276,7 @@ class ReferenceDeployment:
 
     def deny_action(self, token: str, reason: str) -> bool:
         """Human denies a pending action."""
-        return self.protocol.decide_approval(
+        return self.protocol.protocol.decide_approval(
             token=token,
             approved=False,
             approver=self.user_id,
@@ -282,7 +285,7 @@ class ReferenceDeployment:
 
     def engage_killswitch(self, reason: str) -> str:
         """Engage the kill switch (user action). Records on-chain."""
-        tx_hash = self.protocol.engage_killswitch(reason)
+        tx_hash = self.protocol.protocol.engage_killswitch(reason)
 
         self.dual_audit.record_on_chain(
             event_type="killswitch_engaged",
@@ -295,7 +298,7 @@ class ReferenceDeployment:
 
     def disengage_killswitch(self):
         """Disengage the kill switch."""
-        self.protocol.disengage_killswitch()
+        self.protocol.protocol.disengage_killswitch()
 
         self.dual_audit.record_on_chain(
             event_type="killswitch_disengaged",

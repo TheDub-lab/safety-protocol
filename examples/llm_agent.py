@@ -16,12 +16,15 @@ with any real LLM integration (OpenAI, Anthropic, local model, etc.).
 from __future__ import annotations
 import json
 from pathlib import Path
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from safety_protocol import (
     SafetyProtocol,
     BoundAgent,
     ScopeRule,
     AuditTrail,
     ActionOutcome,
+    ActionRequest,
 )
 
 
@@ -290,7 +293,9 @@ def run_example():
                     "https://api.research.example/v1/search",
                     "https://api.research.example/v1/summarize",
                 ],
+                match="prefix",
                 forbidden_targets=["admin", "billing", "production", "internal", "config"],
+                forbid_match="token",
                 max_cost=5.0,
                 requires_approval=False,
             ),
@@ -310,6 +315,7 @@ def run_example():
         budget_limit=50.0,
         approval_threshold_cost=10.0,
         audit=audit,
+        allowed_action_types=["api_call", "spend", "send_message"],
     )
 
     llm = MockLLM(system_prompt="You are a helpful research assistant.")
@@ -420,7 +426,7 @@ def run_example():
     print(f"Protocol state: {status['protocol_state']}")
     print(f"Binding: {status['binding']['user_id']}")
     print()
-    print(status['monitor'].snapshot())
+    print(status['monitor'])
     print()
 
     print("Pending approvals:", status['pending_approvals'])

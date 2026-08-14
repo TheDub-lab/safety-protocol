@@ -191,6 +191,7 @@ class OnChainBoundProtocol:
         scope_rules=None,
         budget_limit=None,
         approval_threshold_cost=10.0,
+        allowed_action_types=None,
     ):
         from .protocol import SafetyProtocol
 
@@ -211,6 +212,7 @@ class OnChainBoundProtocol:
             scope_rules=scope_rules,
             budget_limit=budget_limit,
             approval_threshold_cost=approval_threshold_cost,
+            allowed_action_types=allowed_action_types,
         )
 
         self. binding_tx = tx_hash

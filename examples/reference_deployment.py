@@ -38,7 +38,9 @@ def run():
                     "https://api.research.example/v1/summarize",
                     "https://api.research.example/v1/analyze",
                 ],
+                match="prefix",
                 forbidden_targets=["admin", "billing", "internal", "config", "production"],
+                forbid_match="token",
                 max_cost=8.0,
             ),
             ScopeRule(
@@ -54,6 +56,7 @@ def run():
         budget_limit=100.0,
         approval_threshold=10.0,
         high_value_threshold=25.0,
+        allowed_action_types=["api_call", "spend", "send_message"],
     )
 
     print("DEPLOYMENT INITIALIZED")
@@ -235,10 +238,10 @@ def run():
     print(f"    Binding: agent bound to user (verifiable)")
     print(f"    Off-chain events: {claim['evidence']['off_chain_events']}")
     print(f"    On-chain events: {claim['evidence']['on_chain_events']}")
-    print(f"    Scope violations blocked: {claim['controls_evidence']['scope_violations_blocked']}")
-    print(f"    Approval events: {claim['controls_evidence']['approval_events']}")
-    print(f"    High-value actions: {claim['controls_evidence']['high_value_actions']}")
-    print(f"    Killswitch events: {claim['controls_evidence']['killswitch_events']}")
+    print(f"    Scope violations blocked: {claim['controls_operated']['scope_violations_blocked']}")
+    print(f"    Approval events: {claim['controls_operated']['approval_events']}")
+    print(f"    High-value actions: {claim['controls_operated']['high_value_actions']}")
+    print(f"    Killswitch events: {claim['controls_operated']['killswitch_events']}")
     print(f"    On-chain verifiable: {claim['on_chain_verifiable']}")
     print(f"    Submission ready: {claim['submission_ready']}")
     print()
@@ -271,7 +274,7 @@ def run():
     for k, v in underwriter["control_health"].items():
         print(f"    {k}: {v}")
     print()
-    print(f"  Underwriting notes: {underwriter['underwriting_notes'][:200]}...")
+    print(f"  Control quality: {underwriter['control_quality_assessment'][:200]}...")
     print()
     print(f"  Recommended approach: {underwriter['recommended_underwriting_approach'][:200]}...")
     print()

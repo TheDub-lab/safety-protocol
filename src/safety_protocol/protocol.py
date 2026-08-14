@@ -25,6 +25,7 @@ from .core import (
     ScopeRule,
     AuditTrail,
     Monitor,
+    target_matches,
 )
 
 
@@ -49,6 +50,7 @@ class SafetyProtocol:
         approval_threshold_cost: float = 10.0,
         audit: AuditTrail | None = None,
         monitor: Monitor | None = None,
+        allowed_action_types: list[str] | None = None,
     ):
         """
         Args:
@@ -59,6 +61,12 @@ class SafetyProtocol:
             approval_threshold_cost: Actions costing this much or more need approval
             audit: AuditTrail for immutable logging (auto-created if None)
             monitor: Monitor for real-time visibility (auto-created if None)
+            allowed_action_types: Closed vocabulary of permitted action verbs.
+                An action whose action_type is NOT in this list is blocked
+                regardless of scope rules. If None, the set of action_types
+                referenced by scope_rules is used as the vocabulary. Passing
+                an explicit list is recommended — it forces you to name what
+                the agent can do.
         """
         self.agent_id = agent_id
         self.user_id = user_id
@@ -72,12 +80,22 @@ class SafetyProtocol:
         self._pending_approvals: dict[str, ActionRequest] = {}
         self._start_time = time.time()
 
+        # Closed action vocabulary. Deny-by-default at the verb level:
+        # a verb not in this set is blocked before any rule is consulted.
+        if allowed_action_types is not None:
+            self.allowed_action_types = list(allowed_action_types)
+        else:
+            self.allowed_action_types = sorted({
+                r.action_type for r in self.scope_rules if r.action_type
+            })
+
         # Log initialization
         self.audit.append("protocol_initialized", agent_id, {
             "user_id": user_id,
             "scope_rules_count": len(self.scope_rules),
             "budget_limit": budget_limit,
             "approval_threshold": approval_threshold_cost,
+            "allowed_action_types": self.allowed_action_types,
         })
 
     # ------------------------------------------------------------------
@@ -131,36 +149,90 @@ class SafetyProtocol:
     # ------------------------------------------------------------------
 
     def _check_scope(self, request: ActionRequest) -> str | None:
-        """Returns None if within scope, or a reason string if blocked."""
+        """Returns None if within scope, or a reason string if blocked.
+
+        DENY-BY-DEFAULT. The logic:
+
+        1. Closed verb check — if the action_type isn't in the registered
+           vocabulary, block it. This stops the model from inventing a new
+           verb ("internal_transfer", "spawn_subagent_v2", "magic") that no
+           rule covers. An unregistered verb is never allowed.
+
+        2. For each rule whose action_type matches (or is None):
+           a. forbidden_targets — if ANY matches, block. (Token/regex/glob,
+              not raw substring, so "admin" blocks /api/admin but not
+              readmymind.)
+           b. allowed_targets — the action is permitted ONLY if it matches
+              one of these by the rule's match kind. If the rule has
+              allowed_targets and the target isn't in them, block.
+
+        3. No rule explicitly permitted it → block. Scope is an allowlist,
+           not a hope. The default outcome is DENY.
+        """
+        # 1. Closed verb vocabulary (deny-by-default at the verb level)
+        if (self.allowed_action_types
+                and request.action_type not in self.allowed_action_types):
+            return (
+                f"Action type '{request.action_type}' is not in the "
+                f"registered action vocabulary {self.allowed_action_types} — "
+                f"denied by default"
+            )
+
+        # Collect whether any rule explicitly permits this target.
+        permitted = False
         for rule in self.scope_rules:
             if rule.action_type is not None and request.action_type != rule.action_type:
                 continue
 
+            # forbidden first — hard deny, wins immediately
             if rule.forbidden_targets:
                 for pattern in rule.forbidden_targets:
-                    if pattern in request.target:
+                    if target_matches(pattern, request.target, rule.forbid_match):
                         return (
-                            f"Target '{request.target}' matches forbidden pattern "
-                            f"'{pattern}'"
+                            f"Target '{request.target}' matches forbidden "
+                            f"pattern '{pattern}' ({rule.forbid_match})"
                         )
 
+            # allowed_targets is a precise allowlist for this rule
             if rule.allowed_targets is not None:
-                if request.target not in rule.allowed_targets:
-                    return (
-                        f"Target '{request.target}' not in allowed list: "
-                        f"{rule.allowed_targets}"
-                    )
+                if any(target_matches(p, request.target, rule.match)
+                       for p in rule.allowed_targets):
+                    permitted = True
+                # If this rule carries an allowlist and the target hit none,
+                # the rule does NOT permit it. We don't deny here because a
+                # later rule could permit it — but if NO rule permits it,
+                # the final default denies.
+                continue
 
+            # A rule with action_type match and no allowed_targets is a
+            # blanket allowance for that verb (e.g. allow all "read_file").
+            # Rare; explicit allowlists are preferred.
+            permitted = True
+
+        if not permitted:
+            return (
+                f"No scope rule permits action '{request.action_type}' on "
+                f"target '{request.target}' — denied by default "
+                f"(scope is an allowlist, not a blocklist)"
+            )
+
+        # max_cost per-action cap (only reached if permitted)
+        for rule in self.scope_rules:
+            if rule.action_type is not None and request.action_type != rule.action_type:
+                continue
             if rule.max_cost is not None and request.estimated_cost > rule.max_cost:
                 return (
                     f"Action cost ${request.estimated_cost:.2f} exceeds "
                     f"per-action cap ${rule.max_cost:.2f}"
                 )
 
-            if not rule.allow_subactions and request.action_type == "spawn_subagent":
-                return "Sub-agent spawning is disabled by scope rules"
+        if request.action_type == "spawn_subagent" and not all(
+            r.allow_subactions for r in self.scope_rules
+            if r.action_type in (None, "spawn_subagent")
+        ):
+            return "Sub-agent spawning is disabled by scope rules"
 
-        return None  # No rule matched — allow (could be deny-by-default)
+        return None
 
     # ------------------------------------------------------------------
     # Budget checking
