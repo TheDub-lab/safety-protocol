@@ -78,6 +78,11 @@ class SafetyProtocol:
         self._state = ProtocolState.ACTIVE
         self._spent = 0.0
         self._pending_approvals: dict[str, ActionRequest] = {}
+        # Approved intents: (target, cost-cents) -> expiry ts. When a human
+        # approves an action, the matching retry is allowed for a short window
+        # so the agent can actually proceed after sign-off. Per-intent, not
+        # a blanket allow — a different target or cost still needs approval.
+        self._approved_intents: dict[tuple, float] = {}
         self._start_time = time.time()
 
         # Closed action vocabulary. Deny-by-default at the verb level:
@@ -314,6 +319,12 @@ class SafetyProtocol:
         if approved and self.budget_limit is not None:
             self._spent += request.estimated_cost
 
+        if approved:
+            # Whiten this exact intent for a short window so the agent's
+            # retry (same target + cost) is allowed to proceed.
+            key = (request.target, int(round(request.estimated_cost * 100)))
+            self._approved_intents[key] = time.time() + 300  # 5-minute window
+
         return approved
 
     def get_pending_approvals(self) -> list[dict]:
@@ -382,14 +393,21 @@ class SafetyProtocol:
 
         # 5. Approval gate
         if self._needs_approval(request):
-            token = self.request_approval(request)
-            result = ActionResult(
-                request.request_id,
-                ActionOutcome.PENDING_APPROVAL,
-                requires_approval_for=f"Token: {token}",
-            )
-            self.monitor.record_action(result, request)
-            return result
+            # If a human already approved this exact intent recently, honor it.
+            key = (request.target, int(round(request.estimated_cost * 100)))
+            expiry = self._approved_intents.get(key)
+            if expiry and time.time() < expiry:
+                # Approved — fall through to execute.
+                pass
+            else:
+                token = self.request_approval(request)
+                result = ActionResult(
+                    request.request_id,
+                    ActionOutcome.PENDING_APPROVAL,
+                    requires_approval_for=token,
+                )
+                self.monitor.record_action(result, request)
+                return result
 
         # 6. All checks passed — ALLOW and execute
         self._spent += request.estimated_cost

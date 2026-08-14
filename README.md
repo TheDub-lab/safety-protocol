@@ -187,7 +187,32 @@ cd safety-protocol
 pip install -e .
 python examples/llm_agent.py         # LLM agent operating through the protocol
 python examples/reference_deployment.py  # Full architecture end-to-end
+python examples/scope_test.py         # 21 assertions on the scope perimeter
 ```
+
+### The product: safe payment / spend agent (x402 guard)
+
+An agent that can move money via the [x402](https://x402.org) payment protocol — **but only after the SafetyProtocol gate clears the action.** Recipient allow/deny, per-payment cap, rolling budget, approval threshold, and kill switch all sit *between the agent's intent and the wallet's signature*. The wallet never signs a payment the gate didn't approve. That's the differentiator vs. raw x402, which trusts the caller.
+
+```bash
+# Terminal 1 — a mock x402 merchant (real 402 + signed-authorization verification)
+python examples/mock_merchant.py
+
+# Terminal 2 — the gated agent
+python examples/safe_spend_demo.py
+```
+
+The demo runs five cases, all enforced by the gate before any signing:
+
+| Case | What happens | Wallet signed? |
+|------|--------------|----------------|
+| Normal $0.10 to trusted merchant | allowed → signed → paid (200) | yes |
+| Forbidden recipient (token `evil`) | blocked by deny-by-default | **no** |
+| $50 over per-payment cap | blocked by scope | **no** |
+| $0.75 over approval threshold | pending → human approves → retry pays | after approval |
+| Kill switch engaged | everything blocked | **no** |
+
+The signing primitive is pluggable: the demo uses HMAC over the canonical x402 V2 / EIP-3009 envelope (zero deps, runs anywhere). In production, swap `SimWallet` for a real EIP-3009 signer (`eth_account` / EIP-712) — the envelope shape and the gate logic are unchanged. The merchant offloads verification + settlement to an x402 facilitator (Coinbase CDP, etc.).
 
 ---
 
