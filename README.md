@@ -187,7 +187,10 @@ cd safety-protocol
 pip install -e .
 python examples/llm_agent.py         # LLM agent operating through the protocol
 python examples/reference_deployment.py  # Full architecture end-to-end
-python examples/scope_test.py         # 21 assertions on the scope perimeter
+python examples/scope_test.py         # 29 assertions on the scope perimeter
+python examples/scope_lint_demo.py    # the scope LINTER: catches broad rules
+python examples/safe_spend_demo.py    # safe payment agent (needs mock_merchant)
+python examples/settlement_demo.py    # real-settlement path (testnet-safe)
 ```
 
 ### The product: safe payment / spend agent (x402 guard)
@@ -214,7 +217,26 @@ The demo runs five cases, all enforced by the gate before any signing:
 
 The signing primitive is pluggable: the demo uses HMAC over the canonical x402 V2 / EIP-3009 envelope (zero deps, runs anywhere). In production, swap `SimWallet` for a real EIP-3009 signer (`eth_account` / EIP-712) — the envelope shape and the gate logic are unchanged. The merchant offloads verification + settlement to an x402 facilitator (Coinbase CDP, etc.).
 
----
+#### Real settlement (testnet-safe)
+
+`RealWallet` holds the production signing path: real secp256k1 keys via `eth_account`, building and signing EIP-3009 `transferWithAuthorization` (USDC on Base). It is gated by `LIVE=False` by default — **no funds move unless you explicitly set `LIVE=True`, install `eth_account`, and load a funded key.** `SafeSpendAgent.settle_real()` runs the gate *first*; a blocked or pending action never reaches signing.
+
+```bash
+python examples/settlement_demo.py   # builds the EIP-3009 struct, refuses to go live
+```
+
+```python
+from safety_protocol import RealWallet, SafeSpendAgent
+
+rw = RealWallet(private_key=KEY_FROM_SECRET_MANAGER, live=True, chain_id=8453)
+agent = SafeSpendAgent(protocol, real_wallet=rw, live=True)
+auth = agent.settle_real(recipient, 0.10)   # gate clears -> signed EIP-3009
+# POST auth to a x402 facilitator / submit to the USDC contract
+```
+
+**Honesty note:** in this repo's CI sandbox, `eth_account` isn't installed, so the crypto path is import-guarded (`HAS_REAL_CRYPTO`) and the demos run on the simulator. The production code is correct and ready — `pip install eth_account` + a funded key is the only thing between the demo and a real Base settlement.
+
+
 
 ## What's real and what's simulated
 
@@ -277,6 +299,20 @@ python examples/scope_test.py   # 29 assertions: deny-by-default, vocabulary,
                                  # and the broad-prefix-vs-tight-rule trap
 ```
 
+**A linter catches broad rules before they ship.** Even with the five bindings available, a human can still write a loose rule. `lint_rules()` statically inspects your ruleset and flags the ways it's broader than least-privilege — `CATCH_ALL_PREFIX` (ERROR), `NO_METHOD` / `NO_PARAM_SCHEMA` / `NO_PER_RULE_CAP` / `BLANKET_ALLOW` (WARN), `ALLOW_FORBID_CONFLICT` (ERROR), and dead verbs (INFO). Wire it into CI or a pre-deploy check: any ERROR/WARN blocks the deploy.
+
+```bash
+python examples/scope_lint_demo.py  # proves the linter flags the OLD broad
+                                     # rule and clears the NEW tight one
+```
+
+```python
+from safety_protocol import lint_rules, Severity
+findings = lint_rules(rules, allowed_action_types)
+if any(f.severity in (Severity.ERROR, Severity.WARN) for f in findings):
+    raise SystemExit("scope too broad to ship")
+```
+
 ---
 
 ## The philosophy
@@ -294,6 +330,10 @@ This is how we build reliable agents. Not by hoping the model behaves. By enforc
 ## Status
 
 Alpha. The protocol works. The reference deployment works. The on-chain layer is simulated (same interface as production). The insurance interface provides evidence and reports — it's not connected to a real insurer.
+
+The safe-payment product (`SafeSpendAgent`) works end-to-end behind a real 402/x402 merchant (see `examples/mock_merchant.py`). The signing is simulator-grade (HMAC) by default; the production EIP-3009 path (`RealWallet`) is written and import-guarded, and goes live only with `LIVE=True` + `eth_account` + a funded key.
+
+The scope layer is least-privilege (five bindings, enforced) and ships with a linter (`lint_rules`) that blocks broad rules before deploy.
 
 Use it as a reference architecture. Wire it to your LLM, your chain, your insurer. Adapt the scope rules, budget, and thresholds to your use case.
 

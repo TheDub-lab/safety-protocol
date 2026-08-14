@@ -40,6 +40,7 @@ from urllib.request import Request, urlopen
 
 from .core import ActionOutcome, ActionRequest
 from .protocol import SafetyProtocol
+from .real_wallet import RealWallet, HAS_REAL_CRYPTO
 
 DEFAULT_NETWORK = "eip155:8453"  # Base mainnet (CAIP-2)
 DEFAULT_ASSET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"  # USDC on Base
@@ -170,6 +171,8 @@ class SafeSpendAgent:
         self,
         protocol: SafetyProtocol,
         wallet: SimWallet | None = None,
+        real_wallet: RealWallet | None = None,
+        live: bool = False,
         network: str = DEFAULT_NETWORK,
         asset: str = DEFAULT_ASSET,
         facilitator: str = "https://x402.org/facilitator",
@@ -181,12 +184,43 @@ class SafeSpendAgent:
                 "SafetyProtocol must include 'payment' in allowed_action_types "
                 "for the SafeSpendAgent to operate."
             )
+        # Signer selection: a RealWallet + live=True is the production path
+        # (real secp256k1 / EIP-3009 via eth_account). Otherwise we use the
+        # zero-dep SimWallet so the demo runs anywhere. We never silently
+        # claim to be live — HAS_REAL_CRYPTO is the source of truth.
+        self.live = bool(live) and HAS_REAL_CRYPTO and real_wallet is not None
+        self.real_wallet = real_wallet
         self.protocol = protocol
         self.wallet = wallet or SimWallet()
         self.network = network
         self.asset = asset
         self.facilitator = facilitator
         self.decimals = decimals
+
+    # -- real settlement (gated, opt-in) ---------------------------------
+    def settle_real(self, recipient: str, usd: float, memo: str = "") -> dict:
+        """Produce a REAL EIP-3009 USDC authorization — only after the gate.
+
+        The SafetyProtocol gate runs FIRST. If it blocks or holds for
+        approval, this raises before any signing. Only a cleared action
+        reaches RealWallet.settle(). With LIVE=False this raises rather
+        than produce a chain-touching signature — flip LIVE=True (and
+        install eth_account + fund the wallet) to actually settle.
+        """
+        result, req = self._gate(recipient, usd, {"memo": memo})
+        if result.outcome == ActionOutcome.BLOCKED_KILLSWITCH or result.block_reason:
+            raise PermissionError(
+                f"gate blocked real settlement: {result.block_reason}")
+        if result.outcome == ActionOutcome.PENDING_APPROVAL:
+            raise PermissionError(
+                "real settlement held for approval "
+                f"(token {result.requires_approval_for})")
+        if not self.live or self.real_wallet is None:
+            raise RuntimeError(
+                "settle_real() requires LIVE=True, a loaded RealWallet, and "
+                "eth_account installed. Real money does not move in demo mode.")
+        return self.real_wallet.settle(
+            recipient, amount_to_base_units(usd, self.decimals))
 
     # -- internal: gate an intent, return (ActionResult, PaymentEnvelope-or-None)
     def _gate(self, recipient: str, usd: float, extra: dict | None = None,

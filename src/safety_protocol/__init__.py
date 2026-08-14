@@ -155,6 +155,9 @@ from .onchain import OnChainBindingRegistry, OnChainBoundProtocol
 from .onchain_audit import OnChainAudit, DualAudit
 from .insurance import InsuranceInterface
 from .deployment import ReferenceDeployment
+from .payments import SafeSpendAgent, SimWallet, PaymentEnvelope
+from .real_wallet import RealWallet, HAS_REAL_CRYPTO
+from .scope_linter import lint_rules, lint_report, Finding, Severity
 
 __version__ = "0.2.0"
 __all__ = [
@@ -174,5 +177,14 @@ __all__ = [
     "DualAudit",
     "InsuranceInterface",
     "ReferenceDeployment",
+    "SafeSpendAgent",
+    "SimWallet",
+    "PaymentEnvelope",
+    "RealWallet",
+    "HAS_REAL_CRYPTO",
+    "lint_rules",
+    "lint_report",
+    "Finding",
+    "Severity",
     "__version__",
 ]
