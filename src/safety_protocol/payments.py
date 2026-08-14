@@ -41,6 +41,7 @@ from urllib.request import Request, urlopen
 from .core import ActionOutcome, ActionRequest
 from .protocol import SafetyProtocol
 from .real_wallet import RealWallet, HAS_REAL_CRYPTO
+from .onchain_payment_verifier import OnChainPaymentVerifier
 
 DEFAULT_NETWORK = "eip155:8453"  # Base mainnet (CAIP-2)
 DEFAULT_ASSET = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"  # USDC on Base
@@ -177,6 +178,7 @@ class SafeSpendAgent:
         asset: str = DEFAULT_ASSET,
         facilitator: str = "https://x402.org/facilitator",
         decimals: int = 6,
+        onchain_verifier: OnChainPaymentVerifier | None = None,
     ):
         # The protocol MUST register "payment" in its action vocabulary.
         if "payment" not in (protocol.allowed_action_types or []):
@@ -196,6 +198,11 @@ class SafeSpendAgent:
         self.asset = asset
         self.facilitator = facilitator
         self.decimals = decimals
+        # On-chain confirmation primitive (optional). When present, the agent
+        # can prove a signed payment actually settled on-chain to the intended
+        # recipient BEFORE marking the settlement as "done". Set via env
+        # BASE_RPC_URL to a keyed provider for heavier / continuous use.
+        self.onchain_verifier = onchain_verifier or OnChainPaymentVerifier()
 
     # -- real settlement (gated, opt-in) ---------------------------------
     def settle_real(self, recipient: str, usd: float, memo: str = "") -> dict:
@@ -236,6 +243,27 @@ class SafeSpendAgent:
         )
         result = self.protocol.execute(req)
         return result, req
+
+    # -- on-chain confirmation (proof the signed payment settled) --------
+    def confirm_onchain(
+        self,
+        tx_hash: str,
+        expected_to: str,
+        min_usd: float = 0.01,
+    ) -> dict:
+        """Confirm a USDC payment settled on-chain to `expected_to` >= min_usd.
+
+        Called by the production path AFTER a signed payment is submitted to
+        the facilitator / USDC contract and a tx_hash is available. Returns
+        the verification result; the settlement is only marked "done" when
+        this returns ok=True for the expected recipient and amount.
+
+        This is the "agent moves money via x402 only after the SafetyProtocol
+        gate clears AND the on-chain settlement is confirmed" step. The gate
+        runs FIRST (_gate / direct_pay / pay); this confirms the result
+        settled as intended.
+        """
+        return self.onchain_verifier.confirm_payment(tx_hash, expected_to, min_usd)
 
     def _sign_envelope(self, recipient: str, usd: float) -> PaymentEnvelope:
         now = int(time.time())

@@ -157,6 +157,7 @@ from .insurance import InsuranceInterface
 from .deployment import ReferenceDeployment
 from .payments import SafeSpendAgent, SimWallet, PaymentEnvelope
 from .real_wallet import RealWallet, HAS_REAL_CRYPTO
+from .onchain_payment_verifier import OnChainPaymentVerifier
 from .scope_linter import lint_rules, lint_report, Finding, Severity
 from .guard_service import GuardService, build_protocol_from_config
 
@@ -183,6 +184,7 @@ __all__ = [
     "PaymentEnvelope",
     "RealWallet",
     "HAS_REAL_CRYPTO",
+    "OnChainPaymentVerifier",
     "lint_rules",
     "lint_report",
     "Finding",
