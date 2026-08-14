@@ -191,6 +191,9 @@ python examples/scope_test.py         # 29 assertions on the scope perimeter
 python examples/scope_lint_demo.py    # the scope LINTER: catches broad rules
 python examples/safe_spend_demo.py    # safe payment agent (needs mock_merchant)
 python examples/settlement_demo.py    # real-settlement path (testnet-safe)
+python examples/cli.py lint --config examples/guard_config.json   # lint rules
+python examples/cli.py serve --config examples/guard_config.json   # HTTP guard
+python examples/agent_client.py       # a 'real' agent calling the guard
 ```
 
 ### The product: safe payment / spend agent (x402 guard)
@@ -238,7 +241,52 @@ auth = agent.settle_real(recipient, 0.10)   # gate clears -> signed EIP-3009
 
 
 
-## What's real and what's simulated
+## Deployment: the guard surface a real agent calls
+
+The framework is library code. To actually run an agent safely, you
+operate a **guard** that the agent must pass through. The guard:
+
+- Loads a **user-controlled config** (`examples/guard_config.json`) with
+  least-privilege rules.
+- **Lints the rules on startup and fails closed** — a broad or
+  self-contradictory ruleset means the guard refuses to start. The agent
+  can never widen its own scope; it only sends *intents*.
+- Exposes two surfaces over the `SafetyProtocol` + `SafeSpendAgent`:
+  - **HTTP** (any agent, any language, via stdlib `http.server`)
+  - **CLI** (`safety-guard serve | check | pay | lint`)
+
+```
+POST /guard      {action_type, target, method?, params?, cost?}  -> allow/block
+POST /pay        {recipient, usd, resource?}                     -> gated payment
+POST /approve    {token, approved, approver}                     -> human sign-off
+POST /killswitch {reason}                                        -> kill switch
+GET  /audit      -> immutable decision log
+GET  /health     -> status + lint summary
+```
+
+The agent proposes; the guard disposes. On `allowed` it proceeds, on
+anything else it stops. See `examples/agent_client.py` for a complete
+agent integration (it never touches the rules).
+
+```bash
+# Terminal 1 — the guard (fails closed if rules fail lint)
+python examples/cli.py serve --config examples/guard_config.json
+
+# Terminal 2 — a real agent calling it
+python examples/agent_client.py
+
+# Or ask the guard directly (CI / pre-action checks)
+python examples/cli.py check --config examples/guard_config.json \
+    --action api_call --target https://api.research.example/v1/search \
+    --method POST --params '{"query":"hi"}'
+python examples/cli.py lint --config examples/guard_config.json   # exit 1 if too broad
+```
+
+**Why this is the right shape:** the rules live in a config the *user*
+owns and lints. The agent gets an HTTP/CLI boundary it cannot negotiate
+around. Runtime enforcement stays in infrastructure, not in prompts.
+
+---
 
 **Real:**
 - The safety protocol (scope, budget, approval, monitoring, audit trail, kill switch)
@@ -334,6 +382,8 @@ Alpha. The protocol works. The reference deployment works. The on-chain layer is
 The safe-payment product (`SafeSpendAgent`) works end-to-end behind a real 402/x402 merchant (see `examples/mock_merchant.py`). The signing is simulator-grade (HMAC) by default; the production EIP-3009 path (`RealWallet`) is written and import-guarded, and goes live only with `LIVE=True` + `eth_account` + a funded key.
 
 The scope layer is least-privilege (five bindings, enforced) and ships with a linter (`lint_rules`) that blocks broad rules before deploy.
+
+The guard surface (`GuardService` + `cli.py`) turns the framework into a runnable service: a user-controlled, linted-on-load config, an HTTP/CLI boundary the agent cannot widen, and fail-closed startup.
 
 Use it as a reference architecture. Wire it to your LLM, your chain, your insurer. Adapt the scope rules, budget, and thresholds to your use case.
 
