@@ -391,7 +391,54 @@ if any(f.severity in (Severity.ERROR, Severity.WARN) for f in findings):
 
 ---
 
-## The philosophy
+## Agent Insurance Simulator
+
+The framework isn't just enforceable — it's **quantifiable**. The
+insurance interface (claims evidence, underwriter reports, exposure
+estimates) is the bridge between the runtime controls and a price. The
+simulator closes that loop: it Monte-Carlos an agent's life *through the
+real `SafetyProtocol.execute()` gate*, prices the premium, and draws the
+loss curve.
+
+```bash
+python examples/agent_insurance_sim.py --runs 1000 --events 200 --seed 42
+python examples/agent_insurance_sim.py --quick            # 50 runs, fast
+python examples/agent_insurance_sim.py --curve --svg examples/loss_curve.svg
+python examples/agent_insurance_sim.py --claim            # real InsuranceInterface evidence
+python examples/agent_insurance_sim.py --tamagotchi       # interactive
+```
+
+**What it proves (1,000 runs, 200 events each, seed 42):**
+
+| metric | with controls | no controls |
+|---|---|---|
+| mean loss / run | $252 | $62,514 |
+| p95 | $1,000 | $89,046 |
+| max | $3,000 | $112,850 |
+
+- **Exposure reduction: 99.6%** from controls.
+- **Premium: $275/run with controls vs $2,400 without** — 89% cheaper.
+- The non-zero residual is **authorized misuse** — actions that pass the
+  gate (in-scope, within budget) but are still harmful. Scope/budget
+  can't see intent; that's exactly what insurance + kill switch backstop.
+
+**Four modes:**
+- **Batch (`--runs`)** — Monte Carlo the loss distribution and recommend a parametric premium.
+- **`--curve`** — draws the cumulative-loss trace (controls vs no-controls) as a terminal chart, with `--svg` to export a standalone file.
+- **`--claim`** — runs one representative run and emits the *real*
+  `InsuranceInterface` claims + underwriter package, backed by a
+  populated `DualAudit`/`OnChainAudit` (`on_chain_verifiable: True`,
+  scope violations blocked, submission ready).
+- **`--tamagotchi`** — interactive: you feed the agent tasks, the real
+  gate decides, the kill switch fires on 3 consecutive misuse events,
+  and the live loss sparkline + premium update as you go.
+
+Single file, stdlib + the framework. No DB, no web. Event generation,
+the gate bridge (`_record_dual`), and the actuarial layer are all
+separable — swap `InsuranceEngine` for a real pricing model, or point
+`--claim` at a live `DualAudit`.
+
+---
 
 The user is the accountable party. The user monitors. The user builds safety protocols. The agent doesn't run unsupervised.
 
@@ -418,7 +465,7 @@ The guard surface (`GuardService` + `cli.py`) turns the framework into a runnabl
 - `ScopeRule` + `lint_rules()` — least-privilege rules (five bindings) and a linter that **fails closed** on broad/self-contradictory rules
 - `SafeSpendAgent` + `RealWallet` — x402/USDC payment guard; the wallet only signs what the gate cleared (production EIP-3009 path, gated behind `LIVE=True`)
 - `GuardService` + `cli.py` — HTTP/CLI guard a real agent calls; the agent sends intents, never edits rules
-- Examples: `llm_agent`, `reference_deployment`, `scope_test` (29 assertions), `scope_lint_demo`, `safe_spend_demo` (+ `mock_merchant`), `settlement_demo`, `agent_client`, `guard_config.json`
+- Examples: `llm_agent`, `reference_deployment`, `scope_test` (29 assertions), `scope_lint_demo`, `safe_spend_demo` (+ `mock_merchant`), `settlement_demo`, `agent_client`, `guard_config.json`, `agent_insurance_sim`
 
 Use it as a reference architecture. Wire it to your LLM, your chain, your insurer. Adapt the scope rules, budget, and thresholds to your use case.
 
