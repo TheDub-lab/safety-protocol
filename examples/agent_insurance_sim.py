@@ -93,7 +93,7 @@ def make_protocol():
     )
 
 
-def generate_events(rng, n, drift=False, control_gap=0.05):
+def generate_events(rng, n, drift=False, control_gap=0.05, rogue_burst=False):
     """
     Produce a list of events. Each event is a dict with the request fields
     plus ground-truth 'damage', 'harmful', and 'misuse' flags.
@@ -113,6 +113,10 @@ def generate_events(rng, n, drift=False, control_gap=0.05):
 
     With drift=True the probability of harmful events ramps up over the
     run, simulating an environment that gets progressively riskier.
+
+    With rogue_burst=True a labeled stress scenario is injected: a tight
+    cluster of authorized-misuse events mid-run, to demonstrate the kill
+    switch firing. This is a deliberate scenario, not a random stream.
     """
     events = []
     for i in range(n):
@@ -189,6 +193,20 @@ def generate_events(rng, n, drift=False, control_gap=0.05):
                 "harmful": False,
                 "misuse": False,
             })
+    if rogue_burst:
+        # Deliberate stress scenario: a tight cluster of authorized
+        # misuse mid-run, to demonstrate the kill switch arming. Labeled
+        # honestly — this is not a random stream.
+        burst = [
+            {"category": "authorized_misuse", "action_type": "api_call",
+             "target": ALLOWED_API, "cost": rng.uniform(0.5, 4.0),
+             "urgency": "normal", "damage": DAMAGE_SCOPE,
+             "harmful": True, "misuse": True}
+            for _ in range(4)
+        ]
+        insert_at = n // 2
+        events[insert_at:insert_at] = burst
+
     return events
 
 
@@ -245,6 +263,9 @@ def run_controlled(events, dual=None, trace=False):
     base_cum = 0.0
     ctrl_trace = []
     base_trace = []
+    # Event-level markers for the annotated chart:
+    # 'x' = attack blocked, 'o' = misuse slipped through, 'K' = kill switch fired
+    markers = []
 
     for idx, ev in enumerate(events):
         if ev.get("misuse"):
@@ -277,17 +298,22 @@ def run_controlled(events, dual=None, trace=False):
             executed += 1
             total_loss += ev["damage"]          # misuse/allowed harm, if any
             ctrl_cum += ev["damage"]
+            if ev.get("misuse"):
+                markers.append((idx, "o"))       # misuse slipped through
         elif res.outcome == ActionOutcome.PENDING_APPROVAL:
             blocked += 1
+            markers.append((idx, "x"))           # approval gate caught it
         else:
             blocked += 1
+            markers.append((idx, "x"))           # attack blocked
             if killed and died_on is None:
                 died_on = idx
 
         ctrl_trace.append(ctrl_cum)
 
     if trace:
-        return total_loss, blocked, executed, killed, died_on, ctrl_trace, base_trace
+        return (total_loss, blocked, executed, killed, died_on,
+                ctrl_trace, base_trace, markers)
     return total_loss, blocked, executed, killed, died_on
 
 
@@ -433,11 +459,99 @@ def save_loss_curve_svg(ctrl_trace, base_trace, path, title="Agent loss curve"):
     return path
 
 
-def run_curve(seed=42, events_n=200, control_gap=0.08, drift=False, svg=None):
+def save_loss_curve_png(ctrl_trace, base_trace, markers, path,
+                         title="What the safety gate is worth",
+                         width=1000, height=560, killed_at=None):
+    """
+    Narrative PNG of the cumulative-loss curves (controls vs no-controls).
+    Annotates: blocked attacks (red x ticks), authorized misuse that
+    slipped through (orange dots), the kill switch (vertical line), and a
+    'saved' callout at the end. Pillow only — no cairo/matplotlib.
+
+    Returns the path on success, None if Pillow is missing.
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        print("  [png] Pillow not available — skipping PNG export")
+        return None
+
+    n = len(ctrl_trace)
+    if n == 0:
+        return None
+    max_v = max(max(base_trace), max(ctrl_trace), 1.0)
+    pad_l, pad_r, pad_t, pad_b = 80, 40, 60, 70
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+    x = lambda i: pad_l + (i / max(1, n - 1)) * plot_w
+    y = lambda v: pad_t + plot_h - (v / max_v) * plot_h
+
+    img = Image.new("RGB", (width, height), "white")
+    d = ImageDraw.Draw(img)
+
+    # grid + y labels
+    for g in range(5):
+        gv = max_v * g / 4
+        gy = y(gv)
+        d.line([pad_l, gy, width - pad_r, gy], fill="#eee", width=1)
+        d.text((pad_l - 10, gy - 8), f"${gv:,.0f}", fill="#666", anchor="ra")
+
+    # kill switch vertical line (dashed, drawn as segments)
+    if killed_at is not None:
+        kx = x(killed_at)
+        y0, y1 = pad_t, height - pad_b
+        seg = 8
+        for yy in range(y0, y1, seg * 2):
+            d.line([kx, yy, kx, min(yy + seg, y1)], fill="#7b2ff7", width=2)
+        d.text((kx + 6, pad_t + 4), "KILL SWITCH", fill="#7b2ff7")
+
+    # curves
+    def poly(trace, color):
+        pts = [(x(i), y(v)) for i, v in enumerate(trace)]
+        d.line(pts, fill=color, width=3, joint="curve")
+
+    poly(base_trace, "#d9534f")   # no controls
+    poly(ctrl_trace, "#5cb85c")   # with controls
+
+    # per-event markers
+    for idx, kind in markers:
+        mx, my = x(idx), y(ctrl_trace[idx])
+        if kind == "x":
+            d.line([mx - 4, my - 4, mx + 4, my + 4], fill="#d9534f", width=1)
+            d.line([mx + 4, my - 4, mx - 4, my + 4], fill="#d9534f", width=1)
+        elif kind == "o":
+            d.ellipse([mx - 4, my - 4, mx + 4, my + 4], fill="#f0ad4e")
+
+    # title + legend
+    d.text((width // 2, 22), title, fill="#222", anchor="ma")
+    d.text((pad_l, height - 56), "■ with safety gate (attacks blocked)", fill="#5cb85c")
+    d.text((pad_l + 270, height - 56), "■ no gate (attacks land)", fill="#d9534f")
+    d.text((pad_l, height - 38), "x = attack blocked   ● = misuse slipped through   ┊ = kill switch",
+           fill="#444")
+    d.text((pad_l, height - 20), "Green flat = gate stopped the attacks. Gap at right = loss avoided.",
+           fill="#222")
+
+    # 'saved' callout
+    saved = base_trace[-1] - ctrl_trace[-1]
+    if saved > 0:
+        midx = (pad_l + width - pad_r) // 2
+        midy = pad_t + 30
+        d.rectangle([midx - 150, midy - 18, midx + 150, midy + 18],
+                    fill="#eaf6ea", outline="#5cb85c")
+        d.text((midx, midy), f"GATE SAVED ${saved:,.0f}", fill="#2e7d32", anchor="ma")
+
+    img.save(path)
+    return path
+
+
+def run_curve(seed=42, events_n=200, control_gap=0.08, drift=False,
+             svg=None, png=None, rogue=False):
     rng = random.Random(seed)
-    events = generate_events(rng, events_n, drift=drift, control_gap=control_gap)
+    events = generate_events(rng, events_n, drift=drift, control_gap=control_gap,
+                             rogue_burst=rogue)
     result = run_controlled(events, trace=True)
-    _, blocked, executed, killed, died_on, ctrl_trace, base_trace = result
+    (_, blocked, executed, killed, died_on,
+     ctrl_trace, base_trace, markers) = result
 
     print("=" * 64)
     print("AGENT LOSS CURVE (cumulative insurable loss per event)")
@@ -456,6 +570,11 @@ def run_curve(seed=42, events_n=200, control_gap=0.08, drift=False, svg=None):
         out = save_loss_curve_svg(ctrl_trace, base_trace, svg)
         if out:
             print(f"SVG written: {out}")
+    if png:
+        out = save_loss_curve_png(ctrl_trace, base_trace, markers, png,
+                                  killed_at=died_on if killed else None)
+        if out:
+            print(f"PNG written: {out}")
     print("=" * 64)
     return ctrl_trace, base_trace
 
@@ -473,9 +592,9 @@ def spark(values, width=40):
     return f"[{line}] ${values[-1]:,.0f}"
 
 
-def run_claim_sample(seed=42, events_n=80, control_gap=0.08):
+def run_claim_sample(seed=42, events_n=80, control_gap=0.08, rogue=False):
     rng = random.Random(seed)
-    events = generate_events(rng, events_n, control_gap=control_gap)
+    events = generate_events(rng, events_n, control_gap=control_gap, rogue_burst=rogue)
     dual = DualAudit(OnChainAudit(chain_id="local-testnet"))
     loss, blocked, executed, killed, died_on = run_controlled(events, dual=dual)
 
@@ -680,10 +799,16 @@ def main():
                         "loss curve (controls vs no-controls)")
     ap.add_argument("--svg", type=str, default=None,
                    help="with --curve: also write an SVG loss chart to this path")
+    ap.add_argument("--png", type=str, default=None,
+                   help="with --curve: also write a PNG loss chart to this path")
+    ap.add_argument("--rogue", action="store_true",
+                   help="with --curve/--claim: inject a labeled misuse-cluster "
+                        "stress scenario to demonstrate the kill switch")
     args = ap.parse_args()
 
     if args.claim:
-        run_claim_sample(seed=args.seed, control_gap=args.control_gap)
+        run_claim_sample(seed=args.seed, control_gap=args.control_gap,
+                          rogue=args.rogue)
         return
     if args.tamagotchi:
         run_tamagotchi(deductible=args.deductible, cap=args.cap,
@@ -691,7 +816,8 @@ def main():
         return
     if args.curve:
         run_curve(seed=args.seed, events_n=args.events,
-                   control_gap=args.control_gap, drift=args.drift, svg=args.svg)
+                   control_gap=args.control_gap, drift=args.drift,
+                   svg=args.svg, png=args.png, rogue=args.rogue)
         return
 
     runs = 50 if args.quick else args.runs
