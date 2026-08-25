@@ -144,17 +144,26 @@ class RealWallet:
         typed = {"domain": domain, "types": types, "primaryType":
                  "TransferWithAuthorization", "message": message}
 
-        digest = encode_typed_data(full_message=typed) if HAS_REAL_CRYPTO else None
+        signable = encode_typed_data(full_message=typed) if HAS_REAL_CRYPTO else None
+        # encode_typed_data returns a SignableMessage (version, header, body).
+        # `body` IS the EIP-712 digest (0x19 0x01 || domainSeparator ||
+        # structHash). sign_message signs over body, so the stored digest is
+        # body.hex() — and a verifier recovers over the same bytes.
+        digest = signable.body if signable else None
         return {"typed_data": typed, "digest": digest.hex() if digest else None,
                 "message": message}
 
     def sign_eip3009(self, authorization: dict) -> str:
-        """Sign the authorization digest with the real key (EIP-712)."""
+        """Sign the authorization with the real key (EIP-712).
+
+        `authorization` is the dict returned by build_eip3009_authorization,
+        which carries the full typed_data. eth_account signs the
+        SignableMessage directly; no manual digest handling needed.
+        """
         if not HAS_REAL_CRYPTO or self._acct is None:
             raise RuntimeError("real crypto unavailable — cannot sign")
-        digest = bytes.fromhex(authorization["digest"])
-        signed = self._acct.sign_hash(digest)
-        # EIP-2098 compact signature (65 bytes -> r,s,v)
+        signable = encode_typed_data(full_message=authorization["typed_data"])
+        signed = self._acct.sign_message(signable)
         return signed.signature.hex()
 
     def settle(self, recipient: str, value_base_units: int) -> dict:

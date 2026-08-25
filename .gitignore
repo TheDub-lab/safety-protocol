@@ -1,3 +1,9 @@
 __pycache__/
 *.pyc
 .venv/
+
+# --- wallet keys: NEVER commit ---
+testnet_wallets.json
+*.key.json
+.env
+*.pem

@@ -106,4 +106,6 @@ you the blocked-attack surface your current setup is missing. No model
 changes, no rewrite — the agent just starts asking permission.
 
 ---
-*Safety Protocol Framework — agent safety as infrastructure, not prompts.*
+*Safety Protocol Framework — insurability substrate for autonomous agents:
+the enforcement and evidence layer that makes agent risk priced and
+adjudicated.*
