@@ -102,8 +102,23 @@ def lint_rules(
         at = rule.action_type
         if at is not None:
             covered_verbs.add(at)
+        else:
+            # A rule with action_type=None applies to EVERY verb in the
+            # vocabulary — an allow-all across action types. That's a scope
+            # expansion worth flagging even when the rest of the rule is tight.
+            findings.append(Finding(
+                Severity.WARN, "BLANKET_VERB",
+                f"rule with action_type=None permits EVERY action type in the "
+                f"vocabulary — prefer an explicit action_type so the verb is "
+                f"part of the allowlist, not the whole vocabulary.",
+                rule_index=i, action_type=None,
+            ))
 
-            # 1. Catch-all prefix -> ERROR
+        # ---- Target / breadth checks (run whether or not action_type is set) ----
+        # Previously these only ran when action_type was not None, which left a
+        # blanket (action_type=None) + broad-prefix rule completely unflagged.
+        if rule.allowed_targets is not None:
+            # 1. Catch-all prefix -> ERROR (also catches action_type=None)
             if _is_catch_all_prefix(rule):
                 findings.append(Finding(
                     Severity.ERROR, "CATCH_ALL_PREFIX",
@@ -114,7 +129,7 @@ def lint_rules(
                 ))
 
             # 2. Missing method on a concrete target -> WARN
-            if rule.allowed_targets is not None and rule.methods is None:
+            if rule.methods is None:
                 findings.append(Finding(
                     Severity.WARN, "NO_METHOD",
                     f"rule allows the action regardless of HTTP/transport verb. "
@@ -124,7 +139,7 @@ def lint_rules(
                 ))
 
             # 3. Missing param_schema on a concrete target -> WARN
-            if rule.allowed_targets is not None and rule.param_schema is None:
+            if rule.param_schema is None:
                 findings.append(Finding(
                     Severity.WARN, "NO_PARAM_SCHEMA",
                     f"rule allows the target for ANY params. Params are how a "
@@ -133,23 +148,26 @@ def lint_rules(
                     rule_index=i, action_type=at,
                 ))
 
-            # 4. No per-rule cap -> WARN (for any action that can cost money)
-            if rule.max_cost is None and at in ("spend", "payment", "api_call"):
+            # 4. No per-rule cap -> WARN. Applies to spend/payment/api_call AND
+            #    to action_type=None (which may cover those verbs).
+            if rule.max_cost is None and at in (None, "spend", "payment", "api_call"):
                 findings.append(Finding(
                     Severity.WARN, "NO_PER_RULE_CAP",
                     f"rule has no per-action max_cost. The global budget only "
                     f"catches volume, not a single oversized action. Add `max_cost`.",
                     rule_index=i, action_type=at,
                 ))
-
-            # 5. Blanket rule (no allowlist) -> WARN
-            if rule.allowed_targets is None:
-                findings.append(Finding(
-                    Severity.WARN, "BLANKET_ALLOW",
-                    f"rule has action_type but no allowed_targets — it permits "
-                    f"EVERY target for verb '{at}'. Prefer an explicit allowlist.",
-                    rule_index=i, action_type=at,
-                ))
+        else:
+            # 5. Blanket rule (no allowlist). ERROR if it covers all verbs
+            #    (action_type=None), WARN if it covers a single explicit verb.
+            sev = Severity.ERROR if at is None else Severity.WARN
+            findings.append(Finding(
+                sev, "BLANKET_ALLOW",
+                f"rule has {'no action_type and ' if at is None else ''}no "
+                f"allowed_targets — it permits EVERY target for the covered "
+                f"verb(s). Prefer an explicit allowlist.",
+                rule_index=i, action_type=at,
+            ))
 
         # 6. Contradiction within the rule -> ERROR
         if _contradiction(rule):

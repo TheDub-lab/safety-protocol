@@ -96,6 +96,40 @@ def build_protocol_from_config(cfg: dict) -> tuple[SafetyProtocol, list]:
     return protocol, findings
 
 
+# --------------------------------------------------------------------------- 
+# Guard authenticity — the HTTP surface MUST be gated.
+#
+# The whole thesis of this project is "the agent can't widen its own scope."
+# An unauthenticated /killswitch and /approve endpoint betrays that: anyone who
+# can reach the port can freeze the agent or approve their own actions. So the
+# guard enforces a shared secret on every state-changing endpoint (and on /audit
+# reads when a key is set). With no key configured it runs open BUT logs a loud
+# warning — open-by-default is only acceptable on loopback during local dev, not
+# as a deployment shape. Put a real secret in the config or front it with mTLS.
+# ---------------------------------------------------------------------------
+class GuardAuth:
+    def __init__(self, token: str | None):
+        import secrets
+        self._token = token
+        self._const = secrets.compare_digest if (secrets and token) else None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._token)
+
+    def check(self, headers: dict) -> bool:
+        if not self._token:
+            return True  # open (local dev only) — caller should warn
+        got = headers.get("Authorization", "")
+        if got.startswith("Bearer "):
+            got = got[len("Bearer "):]
+        return self._const(got, self._token)
+
+
+# State-changing routes that always require auth when a token is configured.
+_PROTECTED_ROUTES = {"/guard", "/pay", "/approve", "/killswitch"}
+
+
 # ---------------------------------------------------------------------------
 # The service
 # ---------------------------------------------------------------------------
@@ -104,6 +138,7 @@ class GuardService:
 
     def __init__(self, cfg: dict):
         self.cfg = cfg
+        self.auth = GuardAuth(cfg.get("guard_token"))
         self.protocol, self.findings = build_protocol_from_config(cfg)
         self.agent = None
         if "payment" in (self.protocol.allowed_action_types or []):
@@ -188,6 +223,10 @@ class _Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(n).decode())
 
     def do_GET(self):
+        # /audit is protected when a token is set (it leaks the decision log).
+        if self.service.auth.enabled and self.path == "/audit":
+            if not self.service.auth.check(dict(self.headers)):
+                return self._send(401, {"error": "unauthorized"})
         if self.path == "/health":
             return self._send(200, self.service.health())
         if self.path == "/audit":
@@ -196,6 +235,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         b = self._body()
+        if self.service.auth.enabled and self.path in _PROTECTED_ROUTES:
+            if not self.service.auth.check(dict(self.headers)):
+                return self._send(401, {"error": "unauthorized"})
         if self.path == "/guard":
             return self._send(200, self.service.guard(
                 b.get("action_type", ""), b.get("target", ""),
@@ -224,6 +266,10 @@ def serve(cfg_path: str, host: str = "127.0.0.1", port: int = 8080):
     print(f"[guard] agent={cfg.get('agent_id')} user={svc.protocol.user_id} "
           f"vocab={svc.protocol.allowed_action_types}")
     print(f"[guard] lint: {'BLOCK' if any(f.severity in (Severity.ERROR, Severity.WARN) for f in svc.findings) else 'clean'}")
+    if not svc.auth.enabled:
+        print("[guard] WARNING: no guard_token configured — HTTP surface is OPEN. "
+              "Anyone who can reach this port can guard/approve/kill. Set 'guard_token' "
+              "or run behind mTLS. Acceptable on loopback for local dev only.")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

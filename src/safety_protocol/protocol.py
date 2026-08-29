@@ -27,6 +27,7 @@ from .core import (
     Monitor,
     target_matches,
     validate_params,
+    effective_cost,
 )
 
 
@@ -266,9 +267,9 @@ class SafetyProtocol:
         # of the global budget (which only catches volume).
         if per_rule_caps:
             tightest = min(per_rule_caps)
-            if request.estimated_cost > tightest:
+            if effective_cost(request) > tightest:
                 return (
-                    f"Action cost ${request.estimated_cost:.2f} exceeds "
+                    f"Action cost ${effective_cost(request):.2f} exceeds "
                     f"per-rule cap ${tightest:.2f}"
                 )
 
@@ -287,7 +288,19 @@ class SafetyProtocol:
     def _check_budget(self, request: ActionRequest) -> str | None:
         if self.budget_limit is None:
             return None
-        projected = self._spent + request.estimated_cost
+        cost = effective_cost(request)
+        if request.measured_cost is None:
+            # No authoritative cost available yet: the agent's estimate is the
+            # only signal. We still enforce it (so the declare-0 trick is logged
+            # and, with a real cost meter, blocked), but flag that budget
+            # accounting is advisory until measured_cost is provided.
+            self.audit.append("budget_advisory", self.agent_id, {
+                "request_id": request.request_id,
+                "measured_cost": None,
+                "estimated_cost": request.estimated_cost,
+                "note": "cost not measured; budget enforced on estimate only",
+            })
+        projected = self._spent + cost
         if projected > self.budget_limit:
             return (
                 f"Projected spend ${projected:.2f} exceeds budget limit "
@@ -305,7 +318,7 @@ class SafetyProtocol:
             if rule.action_type == request.action_type and rule.requires_approval:
                 return True
 
-        if request.estimated_cost >= self.approval_threshold_cost:
+        if effective_cost(request) >= self.approval_threshold_cost:
             return True
 
         if request.urgency == "critical":
@@ -358,12 +371,12 @@ class SafetyProtocol:
         self.monitor.record_action(result, request)
 
         if approved and self.budget_limit is not None:
-            self._spent += request.estimated_cost
+            self._spent += effective_cost(request)
 
         if approved:
             # Whiten this exact intent for a short window so the agent's
             # retry (same target + cost) is allowed to proceed.
-            key = (request.target, int(round(request.estimated_cost * 100)))
+            key = (request.target, int(round(effective_cost(request) * 100)))
             self._approved_intents[key] = time.time() + 300  # 5-minute window
 
         return approved
@@ -435,7 +448,7 @@ class SafetyProtocol:
         # 5. Approval gate
         if self._needs_approval(request):
             # If a human already approved this exact intent recently, honor it.
-            key = (request.target, int(round(request.estimated_cost * 100)))
+            key = (request.target, int(round(effective_cost(request) * 100)))
             expiry = self._approved_intents.get(key)
             if expiry and time.time() < expiry:
                 # Approved — fall through to execute.
@@ -451,7 +464,7 @@ class SafetyProtocol:
                 return result
 
         # 6. All checks passed — ALLOW and execute
-        self._spent += request.estimated_cost
+        self._spent += effective_cost(request)
         result = ActionResult(request.request_id, ActionOutcome.ALLOWED, executed=True)
 
         self.monitor.record_action(result, request)
@@ -460,7 +473,9 @@ class SafetyProtocol:
             "action_type": request.action_type,
             "target": request.target,
             "params": request.params,
-            "cost": request.estimated_cost,
+            "cost": effective_cost(request),
+            "estimated_cost": request.estimated_cost,
+            "measured_cost": request.measured_cost,
             "urgency": request.urgency,
         })
 

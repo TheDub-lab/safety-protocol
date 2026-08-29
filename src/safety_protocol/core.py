@@ -9,6 +9,7 @@ import uuid
 import enum
 import json
 import hashlib
+import hmac
 from dataclasses import dataclass, field
 from typing import Any
 from datetime import datetime, timezone
@@ -42,9 +43,31 @@ class ActionRequest:
     params: dict = field(default_factory=dict)
     method: str | None = None  # HTTP/transport verb (GET, POST, DELETE, …)
     estimated_cost: float = 0.0
+    # AUTHORITATIVE cost for budget/cap/approval enforcement. The agent supplies
+    # `estimated_cost`, which is advisory only and MUST NOT be trusted for
+    # accounting — a malicious or buggy agent can declare 0.0 for a $10k action
+    # and slip past budget + approval gates. The execution layer (or a cost
+    # meter that observes the real effect) sets `measured_cost` from what
+    # actually happened. Enforcement uses measured_cost when present, falling
+    # back to estimated_cost only when nothing was measured (which means budget
+    # enforcement is advisory until a real cost source is wired in).
+    measured_cost: float | None = None
     urgency: str = "normal"  # "low", "normal", "high", "critical"
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex[:8])
     timestamp: float = field(default_factory=time.time)
+
+
+def effective_cost(request: ActionRequest) -> float:
+    """The cost used for budget / per-rule cap / approval accounting.
+
+    Prefers the authoritative `measured_cost` (set by the execution layer) over
+    the agent's advisory `estimated_cost`. Falls back to estimated_cost only
+    when no real cost was measured — callers should treat that fallback as
+    advisory and log a warning (see SafetyProtocol._check_budget).
+    """
+    if request.measured_cost is not None:
+        return float(request.measured_cost)
+    return float(request.estimated_cost)
 
 
 @dataclass
@@ -84,16 +107,31 @@ class MatchKind(enum.Enum):
 def normalize_target(target: str) -> str:
     """Normalize a target for comparison.
 
-    Lowercases, collapses repeated slashes, strips a trailing slash.
-    This makes HTTPS://API.X/V1/Users and https://api.x/v1/users the
-    same target — so casing/encoding tricks can't slip past the allowlist.
+    Lowercases, resolves path traversal (``..`` / ``.``), collapses repeated
+    slashes, and strips a trailing slash. This makes
+    HTTPS://API.X/V1/Users and https://api.x/v1/users the same target, and —
+    critically — stops ``/v1/sub/../../admin`` from slipping past a ``/v1/``
+    prefix. After resolution that target becomes ``/admin``, which is OUTSIDE
+    the prefix and is therefore correctly denied. A traversal that stays inside
+    the prefix (e.g. ``/v1/a/../search`` -> ``/v1/search``) still matches, so
+    legitimate same-prefix paths are unaffected.
     """
+    import posixpath
     t = target.strip().lower()
-    # Collapse repeated slashes, but preserve the "://" of a scheme
-    # (e.g. https:// must stay https://, not https:/).
-    t = re.sub(r"(?<!:)//+", "/", t)
-    t = t.rstrip("/")
-    return t
+    # Split scheme://netloc off so traversal resolution never escapes the host.
+    if "://" in t:
+        scheme, rest = t.split("://", 1)
+        if "/" in rest:
+            netloc, path = rest.split("/", 1)
+            path = "/" + path
+        else:
+            netloc, path = rest, ""
+        path = posixpath.normpath(path)
+        if path == ".":
+            path = ""
+        return f"{scheme}://{netloc}{path}"
+    # No scheme: treat the whole string as a path and resolve traversal.
+    return posixpath.normpath(t)
 
 
 def validate_params(params: dict, schema: dict) -> str | None:
@@ -226,21 +264,36 @@ class ScopeRule:
 # ---------------------------------------------------------------------------
 
 class AuditTrail:
-    """
-    Immutable append-only log. Every event is hashed into a chain so
-    tampering is detectable.
+    """Immutable append-only log.
 
-    This is the "blockchain-like" property without requiring an actual
-    chain — the trust is in the integrity of the record. You can verify
-    the chain is intact at any time.
+    Every event is linked into a chain so tampering is detectable. Two modes:
+
+    * **Unkeyed (default).** ``prev_hash`` is a plain SHA-256 chain. This
+      catches *accidental* corruption (a bit flip, a dropped entry) and lets a
+      reader who still holds the original list prove internal consistency. It is
+      NOT tamper-evidence across a trust boundary: a process that can rewrite the
+      whole list can recompute every ``prev_hash`` and produce a chain that
+      verifies clean. That is the same property the old code had — fine for a
+      single trusted runtime, not for "anyone can verify."
+
+    * **Keyed (``auth_key`` set).** Each link is an HMAC over the entry + the
+      previous link's MAC, using a secret kept OUTSIDE the log (ideally in a
+      separate store / HSM). Now rewriting any entry requires the key, so a
+      verifier holding only the root MAC can detect tampering — exactly the
+      "commitment" property you need when the log might be exfiltrated or copied
+      by something that shouldn't be trusted to self-attest. Set ``auth_key`` to
+      enable. ``root_mac()`` returns the current head MAC to snapshot/anchor.
     """
 
-    def __init__(self):
+    def __init__(self, auth_key: bytes | str | None = None):
         self._entries: list[dict] = []
         self._head_hash: str | None = None
+        self._auth_key: bytes | None = (
+            auth_key.encode() if isinstance(auth_key, str) else auth_key
+        )
 
     def append(self, event_type: str, agent_id: str, data: dict) -> str:
-        """Append an event and return its hash."""
+        """Append an event and return its hash/MAC."""
         entry = {
             "seq": len(self._entries),
             "event_type": event_type,
@@ -263,17 +316,45 @@ class AuditTrail:
             "timestamp": entry["timestamp"],
             "prev_hash": entry["prev_hash"],
         }, sort_keys=True, default=str)
-        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+        if self._auth_key is None:
+            return hashlib.sha256(raw.encode()).hexdigest()[:16]
+        # Keyed: HMAC over (raw + previous mac) so the chain is a MAC chain.
+        inner = hashlib.sha256(raw.encode()).hexdigest()
+        return hmac.new(
+            self._auth_key,
+            f"{entry['prev_hash'] or ''}|{inner}".encode(),
+            hashlib.sha256,
+        ).hexdigest()[:32]
+
+    def root_mac(self) -> str | None:
+        """The current head MAC. Snapshot this (e.g. anchor on-chain) to later
+        prove the log you're reading is the one that was produced."""
+        return self._head_hash
 
     def verify_integrity(self) -> list[str]:
-        """Return list of broken sequence numbers, empty if intact."""
+        """Return list of broken sequence numbers.
+
+        In keyed mode this also re-checks every MAC against the secret, so a
+        tampered entry is caught even if the attacker recomputed the whole chain
+        without the key (the MACs won't match). In unkeyed mode it only detects
+        internal inconsistency, not a fully-rewritten chain.
+        """
         broken = []
         prev = None
         for e in self._entries:
             if e["prev_hash"] != prev:
                 broken.append(e["seq"])
+                # Once a link is broken the rest can't be trusted; stop here.
+                return broken
+            if self._auth_key is not None and e["entry_hash"] != self._hash_entry(e):
+                broken.append(e["seq"])
+                return broken
             prev = e["entry_hash"]
         return broken
+
+    def is_tamper_evident(self) -> bool:
+        """True only when a secret key backs the chain (keyed mode)."""
+        return self._auth_key is not None
 
     def query(
         self,
@@ -344,12 +425,14 @@ class Monitor:
 
         if result.outcome == ActionOutcome.ALLOWED:
             self.allowed_count += 1
-            self.total_cost += request.estimated_cost
+            self.total_cost += effective_cost(request)
             self.audit.append("action_allowed", self.agent_id, {
                 "request_id": result.request_id,
                 "action_type": request.action_type,
                 "target": request.target,
-                "cost": request.estimated_cost,
+                "cost": effective_cost(request),
+                "estimated_cost": request.estimated_cost,
+                "measured_cost": request.measured_cost,
             })
         elif result.outcome == ActionOutcome.PENDING_APPROVAL:
             self.approval_pending += 1
