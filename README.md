@@ -30,7 +30,10 @@ measured cost (C7), tamper-evident audit (C8), guard auth (C9), kill switch (C10
 
 **Citable benchmark:** the loss-reduction figure (99.6% exposure reduction; $275 vs $2,400 premium/run) is reproducible and versioned in **[`BENCHMARK.md`](BENCHMARK.md)** — `python benchmark/run.py --runs 1000 --events 200 --seed 42`. It drives the *real* gate, not a mock.
 
-**Integrations:** the **[`integrations/`](integrations) (Claude Agent SDK)** adapter makes any Claude-agent app Safety-Protocol-compatible by routing every tool call through the gate via `can_use_tool`. LangChain/CrewAI adapters are next.
+**Integrations:** the **[`integrations/`](integrations)** adapters make agent apps Safety-Protocol-compatible by routing every tool call through the gate:
+- **[Claude Agent SDK](integrations/claude_agent_sdk)** — via `can_use_tool`
+- **[LangChain](integrations/langchain)** — via a tool wrapper (pre-execution enforcement, not observer-only callbacks)
+- CrewAI / AutoGen / LlamaIndex adapters are next.
 
 If you build an agent-safety layer, implement to `SPEC.md` and run the suite —
 passing it is what makes you compatible, not copying this code.
