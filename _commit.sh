@@ -3,9 +3,10 @@ cd "$(dirname "$0")"
 AUTHOR_NAME="TheDub-lab"
 AUTHOR_EMAIL="thislife1made@gmail.com"
 git add -A
-git -c "user.name=$AUTHOR_NAME" -c "user.email=$AUTHOR_EMAIL" commit -q -m "Spec: SPEC.md (v0.1 gate/scope/audit contract) + conformance suite (C1-C10)
+git -c "user.name=$AUTHOR_NAME" -c "user.email=$AUTHOR_EMAIL" commit -q -m "Benchmark: BENCHMARK.md (citable, reproducible loss-reduction figure) + benchmark/run.py
 
-Extract the gate contract from the README/impl into a versioned open spec and a
-runnable conformance harness so the project is the STANDARD others implement
-against, not just a reference repo. All 10 clauses pass against this impl."
-git log --oneline -2
+Versioned (safety-protocol-benchmark/1.0) reproducible runner that drives the REAL
+gate over a seeded event stream (controls vs no-controls). Numbers match the README:
+99.6% exposure reduction, \$275.16 vs \$2,400.00 premium/run. Honest 5% authorized-misuse
+residual stated in method. README points to it."
+git log --oneline -1

@@ -28,6 +28,8 @@ Clauses: deny-by-default (C1), closed vocabulary (C2), five bindings (C3),
 forbidden tokens (C4), traversal-proof scope (C5), linter fail-closed (C6),
 measured cost (C7), tamper-evident audit (C8), guard auth (C9), kill switch (C10).
 
+**Citable benchmark:** the loss-reduction figure (99.6% exposure reduction; $275 vs $2,400 premium/run) is reproducible and versioned in **[`BENCHMARK.md`](BENCHMARK.md)** — `python benchmark/run.py --runs 1000 --events 200 --seed 42`. It drives the *real* gate, not a mock.
+
 If you build an agent-safety layer, implement to `SPEC.md` and run the suite —
 passing it is what makes you compatible, not copying this code.
 
