@@ -3,14 +3,11 @@ cd "$(dirname "$0")"
 AUTHOR_NAME="TheDub-lab"
 AUTHOR_EMAIL="thislife1made@gmail.com"
 git add -A
-git -c "user.name=$AUTHOR_NAME" -c "user.email=$AUTHOR_EMAIL" commit -q -m "Integration: LangChain adapter (Safety-Protocol-compatible via tool wrapper)
+git -c "user.name=$AUTHOR_NAME" -c "user.email=$AUTHOR_EMAIL" commit -q -m "Finish Claude Agent SDK adapter: flexible callback, from_config_string, 10s smoke test, lint-clean demo config, RELEASE.md
 
-Route every LangChain tool call through the real SafetyProtocol gate via a
-SafetyProtocolTool wrapper (pre-execution enforcement), NOT an observer-only
-callback -- on_tool_start cannot reliably block. Tool->action mapping
-(shell->exec, file_write->write_file, http->api_call, ...), deny/allow/approval
-verdict, fail-closed from_config, pluggable human approver, audit-only callback.
-test_adapter.py: 14/14 clauses pass (incl. L8 proving a blocked call never
-invokes the wrapped tool). integrations/langchain/README.md + top-level pointer.
-demo example_agent.py (LangChain-backed)."
+- can_use_tool/guard_async accept (tool_name, input_data, context, **kwargs) to match the official SDK signature
+- from_config_string() builds from an in-memory dict (no temp file)
+- smoke_test.py proves allow/deny path in 10s, no SDK/API key needed
+- demo + smoke configs are lint-clean (param_schema permits the tool param; no catch-all prefix)
+- RELEASE.md: install + 5-line usage + verify + honest limits"
 git log --oneline -1

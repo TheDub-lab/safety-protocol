@@ -33,11 +33,15 @@ CONFIG = {
     "approval_threshold_cost": 10.0,
     "scope_rules": [
         {"action_type": "exec", "allowed_targets": ["ls -la /tmp", "pwd"],
-         "match": "exact", "methods": ["Bash"], "max_cost": 1.0},
-        {"action_type": "read_file", "allowed_targets": ["/tmp/"], "match": "prefix",
-         "methods": ["Read"], "max_cost": 0.0},
+         "match": "exact", "methods": ["Bash"], "max_cost": 1.0,
+         "param_schema": {"type": "object", "properties": {"command": {}}, "additionalProperties": False},
+         "forbidden_targets": ["rm", "curl", "git push"], "forbid_match": "token"},
+        {"action_type": "read_file", "allowed_targets": ["/tmp/ok.txt"], "match": "exact",
+         "methods": ["Read"], "max_cost": 0.0,
+         "param_schema": {"type": "object", "properties": {"file_path": {}}, "additionalProperties": False}},
         {"action_type": "api_call", "allowed_targets": ["https://api.weather.example/"],
-         "match": "prefix", "methods": ["WebFetch"], "max_cost": 2.0},
+         "match": "prefix", "methods": ["WebFetch"], "max_cost": 2.0,
+         "param_schema": {"type": "object", "properties": {"url": {}}, "additionalProperties": False}},
     ],
 }
 
@@ -58,7 +62,7 @@ async def main():
               f"[example] The gate wiring is verified headless by test_adapter.py (11/11 pass).")
         return
 
-    adapter = _adapter_from_dict(CONFIG)
+    adapter = ClaudeSafetyAdapter.from_config_string(CONFIG)
     adapter.human_approver = demo_approver
     cb = sdk_callback(adapter)
     if cb is None:  # pragma: no cover
@@ -75,16 +79,6 @@ async def main():
         async for msg in client.receive_response():
             if isinstance(msg, ResultMessage):
                 print(msg.content)
-
-
-def _adapter_from_dict(cfg: dict) -> ClaudeSafetyAdapter:
-    """Build an adapter from an in-memory dict (avoids writing a temp file)."""
-    import json
-    import tempfile
-    p = os.path.join(tempfile.gettempdir(), "claude_guard_cfg.json")
-    with open(p, "w") as f:
-        json.dump(cfg, f)
-    return ClaudeSafetyAdapter.from_config(p)
 
 
 if __name__ == "__main__":

@@ -123,8 +123,17 @@ class ClaudeSafetyAdapter:
             )
         return cls(GuardService(cfg), human_approver=human_approver)
 
+    @classmethod
+    def from_config_string(cls, cfg: dict, human_approver: Callable | None = None) -> "ClaudeSafetyAdapter":
+        """Build directly from an in-memory config dict (no temp file)."""
+        import tempfile
+        p = os.path.join(tempfile.gettempdir(), "claude_guard_cfg.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        return cls.from_config(p, human_approver=human_approver)
+
     # -- core decision -----------------------------------------------------
-    def decide(self, tool_name: str, tool_input: dict) -> dict:
+    def decide(self, tool_name: str, tool_input: Any, context: Any = None) -> dict:
         """Run one tool call through the gate. Returns a normalized verdict:
         {"behavior": "allow"|"deny", "message": str, "request_id": str,
          "requires_approval": bool}.
@@ -135,7 +144,7 @@ class ClaudeSafetyAdapter:
             target=target,
             method=tool_name,
             params=params,
-            cost=float((tool_input.get("cost") or 0.0)),
+            cost=float((params.get("cost") or 0.0)),
         )
         outcome = verdict["outcome"]
 
@@ -171,12 +180,13 @@ class ClaudeSafetyAdapter:
                 "message": f"Safety Protocol blocked: {verdict.get('block_reason')}",
                 "request_id": verdict["request_id"], "requires_approval": False}
 
-    # -- SDK-compatible callback (sync form; wrap in async for the SDK) ------
-    def can_use_tool(self, tool_name: str, tool_input: dict, context: Any = None) -> dict:
-        return self.decide(tool_name, tool_input)
+    # -- SDK-compatible callback (flexible arg shape; mirrors the official
+    #    can_use_tool(tool_name, input_data, context) signature) -----------
+    def can_use_tool(self, tool_name: str, tool_input: Any, context: Any = None, **kwargs) -> dict:
+        return self.decide(tool_name, tool_input, context)
 
-    async def guard_async(self, tool_name: str, tool_input: dict, context: Any = None) -> dict:
-        return self.decide(tool_name, tool_input)
+    async def guard_async(self, tool_name: str, tool_input: Any, context: Any = None, **kwargs) -> dict:
+        return self.decide(tool_name, tool_input, context)
 
 
 # ---------------------------------------------------------------------------
