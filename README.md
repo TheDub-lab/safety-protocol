@@ -8,7 +8,28 @@ This framework provides the enforcement layer. The agent operates freely **withi
 
 When the agent messes up, the audit trail tells you what happened, the binding tells you who's accountable, and the next iteration has tighter scope. That's the model.
 
-**The one thing that makes the rest real:** scope has to be *least-privilege and fail-closed*, or the other controls are decorative. A broad allowlist (a `prefix` on `/v1/`) lets the agent hit `/v1/admin` and `/v1/delete-everything` — so budget, approval, and kill-switch all sit inside a loose perimeter and mean nothing. This project enforces scope on **five** bindings (action type, target, method, params, per-action cap), ships a **linter that fails closed** (a broad or self-contradictory rule means the guard refuses to start), and runs as a **guard** the agent calls over HTTP/CLI — the agent can only send intents, never widen its own scope.
+A broad allowlist (a `prefix` on `/v1/`) lets the agent hit `/v1/admin` and `/v1/delete-everything` — so budget, approval, and kill-switch all sit inside a loose perimeter and mean nothing. This project enforces scope on **five** bindings (action type, target, method, params, per-action cap), ships a **linter that fails closed** (a broad or self-contradictory rule means the guard refuses to start), and runs as a **guard** the agent calls over HTTP/CLI — the agent can only send intents, never widen its own scope.
+
+---
+
+## Spec & conformance (the standard, not just the code)
+
+This repo is the **reference implementation**. The contract it implements is the
+**[Safety Protocol Spec (`SPEC.md`)](SPEC.md)** — versioned, open, and the thing
+other agents/tools implement *against*. An implementation that passes the
+**conformance suite** is **Safety-Protocol-compatible**:
+
+```bash
+python conformance/run.py        # SPEC.md C1..C10, exit non-zero on failure
+pytest conformance/              # same, as discoverable per-clause tests
+```
+
+Clauses: deny-by-default (C1), closed vocabulary (C2), five bindings (C3),
+forbidden tokens (C4), traversal-proof scope (C5), linter fail-closed (C6),
+measured cost (C7), tamper-evident audit (C8), guard auth (C9), kill switch (C10).
+
+If you build an agent-safety layer, implement to `SPEC.md` and run the suite —
+passing it is what makes you compatible, not copying this code.
 
 ---
 

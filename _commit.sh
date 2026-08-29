@@ -3,4 +3,9 @@ cd "$(dirname "$0")"
 AUTHOR_NAME="TheDub-lab"
 AUTHOR_EMAIL="thislife1made@gmail.com"
 git add -A
-git -c "user.name=$AUTHOR_NAME" -c "user.email=$AUTHOR_EMAIL" commit -q -m "Production adapters: measured-cost meter, env audit key + root_mac anchor, guard mTLS, real on-chain layer (web3, import-guarded)" && git push origin master 2>&1 | tail -3 && git log --oneline -2
+git -c "user.name=$AUTHOR_NAME" -c "user.email=$AUTHOR_EMAIL" commit -q -m "Spec: SPEC.md (v0.1 gate/scope/audit contract) + conformance suite (C1-C10)
+
+Extract the gate contract from the README/impl into a versioned open spec and a
+runnable conformance harness so the project is the STANDARD others implement
+against, not just a reference repo. All 10 clauses pass against this impl."
+git log --oneline -2
