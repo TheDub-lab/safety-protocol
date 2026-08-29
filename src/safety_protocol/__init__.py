@@ -160,6 +160,10 @@ from .real_wallet import RealWallet, HAS_REAL_CRYPTO
 from .onchain_payment_verifier import OnChainPaymentVerifier
 from .scope_linter import lint_rules, lint_report, Finding, Severity
 from .guard_service import GuardService, build_protocol_from_config
+from .cost_meter import CostMeter, PriceTableMeter, register_meter, get_meter
+from .onchain_real import (
+    RealOnChainBinding, RealOnChainAudit, build_onchain, is_configured, HAS_WEB3,
+)
 
 __version__ = "0.2.0"
 __all__ = [
@@ -189,5 +193,16 @@ __all__ = [
     "lint_report",
     "Finding",
     "Severity",
+    "GuardService",
+    "build_protocol_from_config",
+    "CostMeter",
+    "PriceTableMeter",
+    "register_meter",
+    "get_meter",
+    "RealOnChainBinding",
+    "RealOnChainAudit",
+    "build_onchain",
+    "is_configured",
+    "HAS_WEB3",
     "__version__",
 ]

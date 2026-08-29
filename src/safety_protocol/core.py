@@ -356,6 +356,45 @@ class AuditTrail:
         """True only when a secret key backs the chain (keyed mode)."""
         return self._auth_key is not None
 
+    @classmethod
+    def from_env(cls, env_var: str = "SAFETY_AUDIT_KEY") -> "AuditTrail":
+        """Build an AuditTrail whose key comes from the environment / secret
+        manager, NOT from code or the agent. If the var is unset, returns an
+        UNKEYED trail (logs a warning via the caller) — never silently fakes
+        tamper-evidence. Callers should fail closed if they require verifiability.
+        """
+        import os
+        key = os.environ.get(env_var)
+        if not key:
+            return cls(auth_key=None)  # unkeyed; tamper_evident() == False
+        return cls(auth_key=key.encode())
+
+    def commit_root_mac(self, sink: str | None = None) -> str | None:
+        """Snapshot the current head MAC so a verifier can later prove this is
+        the produced log. ``sink`` selects where to anchor:
+
+        * ``"stdout"`` / None-and-SAFETY_AUDIT_ANCHOR unset: just return it
+          (caller anchors it — e.g. write to a signed file, print, or POST
+          to your chain).
+        * ``"file:<path>"``: append ``"root_mac <mac>\\n"`` to that file.
+        * (Extend this for on-chain anchoring by calling your OnChainAudit.)
+
+        The point: the keyed chain is only useful if the root MAC leaves the
+        process. Without anchoring, anyone who copies the in-memory log can
+        still rewrite it — they just can't reproduce a MAC the verifier trusts.
+        """
+        mac = self.root_mac()
+        if mac is None:
+            return None
+        if sink and sink.startswith("file:"):
+            path = sink[len("file:"):]
+            try:
+                with open(path, "a") as fh:
+                    fh.write(f"root_mac {mac}\n")
+            except OSError:
+                pass  # caller decides whether missing anchor is fatal
+        return mac
+
     def query(
         self,
         agent_id: str | None = None,

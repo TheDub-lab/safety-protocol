@@ -358,36 +358,46 @@ around. Runtime enforcement stays in infrastructure, not in prompts.
 
 ---
 
-## Hardening notes (read before deploying)
+## Hardening notes (production adapters shipped)
 
-The enforcement layer is only as strong as what it measures. Three points that
-the reference architecture assumes but does **not** provide for you:
+The enforcement layer is only as strong as what it measures. All four production
+gaps now have **config-activated adapters** — they activate purely on config/env,
+with no live credentials in the code. Until you provide the credentials, the
+framework falls back to the safe local-dev behavior and logs a warning.
 
-- **Cost must be *measured*, not *declared*.** `ActionRequest.estimated_cost`
-  is advisory — the agent supplies it, so a malicious or buggy agent can declare
-  `$0.00` for a real `$10k` action and slip past budget + approval gates.
-  The protocol routes budget, the per-rule cap, and the approval threshold
-  through `effective_cost()`, which prefers `request.measured_cost` (set by the
-  execution layer / a real cost meter that observes the effect). Until a cost
-  source is wired in, the gate still enforces on the estimate but logs a
-  `budget_advisory` event so you know accounting was unverified. **Do not ship
-  without a measured-cost path.**
-- **Targets are traversal-resolved.** `normalize_target()` resolves `..`/`.`
-  before matching, so a prefix rule on `/v1/` no longer also permits
-  `/v1/sub/../../admin` (it becomes `/admin`, correctly out of scope). Watch
-  for this when writing prefix allowlists.
-- **The audit trail is tamper-evident only in keyed mode.** `AuditTrail(auth_key=...)`
-  produces an HMAC chain whose head `root_mac()` can be anchored externally;
-  rewriting any entry without the key is then detectable. The default (unkeyed)
-  SHA chain only catches accidental corruption, not a process that can rewrite
-  the whole log. Snapshot `root_mac()` (or anchor it on-chain) for real
-  verifiability.
-- **The HTTP guard must be authenticated.** `GuardService` accepts a
-  `guard_token`; with it set, `/guard`, `/pay`, `/approve`, `/killswitch`, and
-  `/audit` require `Authorization: Bearer <token>` (constant-time compare) and
-  return 401 otherwise. With no token the service runs **open** and prints a
-  warning — local dev only. Put a real secret in the config or front it with
-  mTLS before exposing the port.
+- **Measured cost (shipped).** `SafetyProtocol(cost_meter=...)` runs a `CostMeter`
+  after each ALLOWED action; the real cost is stamped on `request.measured_cost`,
+  the running total is reconciled to it, and the budget is re-checked against the
+  measured figure. The agent's `estimated_cost` is never the source of truth when
+  a meter is present. Guard config: `"cost_meter": "price_table"` (built-in flat
+  table) or `"cost_meter_prices": {"api_call": 0.01}`; or subclass `CostMeter` and
+  register it for billing-API pricing. Without a meter, budget runs on the
+  estimate and logs `budget_advisory`.
+- **Path-traversal resolved.** `normalize_target()` resolves `..`/`.` before
+  matching, so a prefix rule on `/v1/` no longer also permits
+  `/v1/sub/../../admin` (it becomes `/admin`, correctly out of scope).
+- **Tamper-evident audit (shipped).** `AuditTrail(auth_key=...)` or
+  `AuditTrail.from_env("SAFETY_AUDIT_KEY")` produces an HMAC chain; `root_mac()`
+  is the snapshottable head — anchor it (`commit_root_mac(sink="file:...")` or your
+  chain) so a verifier can prove the log you hold is the one produced. Without a
+  key the trail is unkeyed (accidental-corruption-only) and the guard warns.
+- **Authenticated + optional mTLS guard (shipped).** `guard_token` → bearer auth
+  (401 on state-changing routes + `/audit`). mTLS via config: `"tls_cert"`,
+  `"tls_key"`, and `"tls_ca"` → `CERT_REQUIRED` client-cert mode. Without TLS the
+  token is the boundary; the open-port warning still applies.
+- **Real on-chain layer (shipped, optional).** `safety_protocol.onchain_real`
+  provides `RealOnChainBinding` / `RealOnChainAudit` with the same interface as the
+  simulators, talking to a real EVM chain via `web3` when configured
+  (`"onchain": {"rpc_url", "contract_address", "private_key", "chain_id"}` or env
+  `ONCHAIN_RPC_URL` / `ONCHAIN_CONTRACT` / `ONCHAIN_PRIVATE_KEY`). `ReferenceDeployment(
+  onchain_cfg=...)` uses it automatically; without it, the in-memory sim is used and
+  the interface is identical. Import-guarded: if `web3` isn't installed or creds are
+  absent, it never silently fakes verifiability.
+
+Run `examples/regression_adapters.py` to exercise all four. **You still provide:**
+the real cost source, the audit key (env/secret manager), TLS certs (generate a CA
++ client cert), and the deployed ERC-5192/8004 contract + funded key. The code
+activates the moment those exist.
 
 ---
 
@@ -500,9 +510,9 @@ The scope layer is least-privilege (five bindings, enforced) and ships with a li
 
 The guard surface (`GuardService` + `cli.py`) turns the framework into a runnable service: a user-controlled, linted-on-load config, an HTTP/CLI boundary the agent cannot widen, and fail-closed startup. The HTTP surface is authenticated via `guard_token` (401 without a bearer token on state-changing routes); without a token it runs open and warns you.
 
-**Hardening shipped (see "Hardening notes"):** cost enforcement routes through `effective_cost()` (prefers an authoritative `measured_cost` over the agent's advisory `estimated_cost`, logging a `budget_advisory` when unmeasured); `normalize_target()` resolves `..`/`.` traversal so prefix rules can't be escaped; `AuditTrail(auth_key=...)` produces a tamper-evident HMAC chain with a snapshottable `root_mac()`; and the linter now flags blanket `action_type=None` rules (a prior blind spot). Regression tests: `examples/regression_enforcement.py`, `examples/regression_guard_auth.py`.
+**Hardening shipped:** measured-cost `CostMeter` (reconciles `measured_cost` into the running total + re-checks budget); `normalize_target()` traversal resolution; keyed `AuditTrail` (`auth_key` / `SAFETY_AUDIT_KEY` + `root_mac()` anchoring); authenticated guard (`guard_token` + optional mTLS via `tls_*` config); and a real on-chain adapter (`onchain_real`, web3-backed, import-guarded, used by `ReferenceDeployment(onchain_cfg=...)`). Regression tests: `examples/regression_enforcement.py`, `examples/regression_guard_auth.py`, `examples/regression_adapters.py`.
 
-**Production gaps still on you:** wire a real cost meter (set `measured_cost`), keep the audit `auth_key` outside the process and anchor `root_mac()`, replace the simulated on-chain layer, and put auth/mTLS in front of the guard before exposing the port.
+**Production wiring still on you (credentials/infra, not code):** a real cost source for the meter, the audit key in env/secret manager, TLS CA + client certs, and the deployed ERC-5192/8004 contract + funded key. The adapters activate the moment those exist.
 
 **What you get in this repo:**
 - `SafetyProtocol` — the enforcement layer (scope, budget, approval, audit, kill switch), deny-by-default

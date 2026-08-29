@@ -42,6 +42,7 @@ from safety_protocol.core import (
 from safety_protocol.protocol import SafetyProtocol
 from safety_protocol.payments import SafeSpendAgent, SimWallet
 from safety_protocol.scope_linter import lint_rules, lint_report, Severity
+from safety_protocol import cost_meter as cost_meter_mod
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +84,29 @@ def build_protocol_from_config(cfg: dict) -> tuple[SafetyProtocol, list]:
             "REFUSING TO START — scope rules failed lint:\n"
             + lint_report(findings)
         )
-    audit = AuditTrail()
+    # Audit trail: prefer an env/secret-loaded keyed trail so the chain is
+    # tamper-evident across trust boundaries. If a key is explicitly given in
+    # config we use it; otherwise we fall back to SAFETY_AUDIT_KEY from the env;
+    # otherwise an unkeyed trail (caller should fail closed if it requires the
+    # "verifiable by anyone" property). Never silently fake verifiability.
+    explicit_key = cfg.get("audit_key")
+    if explicit_key:
+        audit = AuditTrail(auth_key=str(explicit_key).encode())
+    else:
+        audit = AuditTrail.from_env()
+    if not audit.is_tamper_evident():
+        print("[guard] WARNING: audit trail is NOT tamper-evident (no audit_key / "
+              "SAFETY_AUDIT_KEY). Set one (or 'audit_key' in config) for verifiable audit.")
+    # Cost meter: config can name a registered meter, or pass inline prices.
+    meter = None
+    meter_name = cfg.get("cost_meter")
+    meter_prices = cfg.get("cost_meter_prices")
+    if meter_name:
+        meter = cost_meter_mod.get_meter(meter_name)
+        if meter is None:
+            raise SystemExit(f"REFUSING TO START — unknown cost_meter '{meter_name}'")
+    elif meter_prices is not None:
+        meter = cost_meter_mod.PriceTableMeter(meter_prices)
     protocol = SafetyProtocol(
         agent_id=cfg.get("agent_id", "guard-agent"),
         user_id=cfg.get("user_id", "user"),
@@ -92,6 +115,7 @@ def build_protocol_from_config(cfg: dict) -> tuple[SafetyProtocol, list]:
         approval_threshold_cost=cfg.get("approval_threshold_cost", 10.0),
         audit=audit,
         allowed_action_types=vocab,
+        cost_meter=meter,
     )
     return protocol, findings
 
@@ -257,12 +281,34 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def serve(cfg_path: str, host: str = "127.0.0.1", port: int = 8080):
+    import ssl
     with open(cfg_path) as f:
         cfg = json.load(f)
     svc = GuardService(cfg)  # may SystemExit if lint fails -> fail closed
     _Handler.service = svc
     httpd = ThreadingHTTPServer((host, port), _Handler)
-    print(f"[guard] listening on http://{host}:{port}")
+
+    # Optional mutual TLS. Activated only when tls_cert + tls_key are present.
+    # With tls_ca set, clients must present a cert signed by that CA
+    # (CERT_REQUIRED) — the real deployment shape for "the agent can't widen
+    # its own scope": the calling agent authenticates with a client cert, and
+    # the guard_token is defense-in-depth. Without TLS the guard_token alone is
+    # the boundary; the open-port warning below still applies.
+    tls_cert = cfg.get("tls_cert")
+    tls_key = cfg.get("tls_key")
+    tls_ca = cfg.get("tls_ca")
+    scheme = "http"
+    if tls_cert and tls_key:
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
+        if tls_ca:
+            ctx.load_verify_locations(cafile=tls_ca)
+            ctx.verify_mode = ssl.CERT_REQUIRED  # mTLS
+        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+        scheme = "https"
+        print(f"[guard] TLS enabled ({'mTLS (CERT_REQUIRED)' if tls_ca else 'TLS, no client-cert required'})")
+
+    print(f"[guard] listening on {scheme}://{host}:{port}")
     print(f"[guard] agent={cfg.get('agent_id')} user={svc.protocol.user_id} "
           f"vocab={svc.protocol.allowed_action_types}")
     print(f"[guard] lint: {'BLOCK' if any(f.severity in (Severity.ERROR, Severity.WARN) for f in svc.findings) else 'clean'}")

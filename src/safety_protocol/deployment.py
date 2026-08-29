@@ -29,6 +29,7 @@ from safety_protocol import (
 )
 from .onchain import OnChainBindingRegistry, OnChainBoundProtocol
 from .onchain_audit import OnChainAudit, DualAudit
+from .onchain_real import build_onchain, is_configured
 from .insurance import InsuranceInterface
 
 
@@ -85,24 +86,31 @@ class ReferenceDeployment:
         approval_threshold=10.0,
         high_value_threshold=25.0,
         allowed_action_types=None,
+        onchain_cfg: dict | None = None,
     ):
         """
         Initialize the full reference deployment.
 
         Args:
-            agent_id: Unique agent identifier
-            user_id: The accountable user this agent is bound to
-            agent_name: Descriptive name for the agent
-            agent_role: What the agent does
-            scope_rules: List of ScopeRule objects
-            budget_limit: Maximum total spend
-            approval_threshold: Actions above this cost need approval
-            high_value_threshold: Actions above this are recorded on-chain
-            allowed_action_types: Closed vocabulary of permitted action verbs
+            ... (see above)
+            onchain_cfg: Optional real-chain config (see onchain_real.build_onchain).
+                When fully configured, Layer 2 uses REAL on-chain binding/audit
+                instead of the in-memory simulation. Otherwise the simulator is
+                used and the interface is identical. Never raises for "not
+                configured" — that's the normal local-dev state.
         """
-        # Layer 2: On-chain anchors
-        self.on_chain_registry = OnChainBindingRegistry()
-        self.on_chain_audit = OnChainAudit(chain_id="reference-deployment")
+        # Layer 2: On-chain anchors. Use the REAL chain when fully configured,
+        # otherwise the in-memory simulation. The interface is identical, so the
+        # rest of the deployment is agnostic to which one it got.
+        real = build_onchain(onchain_cfg or {}) if onchain_cfg else None
+        if real is not None:
+            self.on_chain_registry = real
+            self.on_chain_audit = real
+            self._onchain_real = True
+        else:
+            self.on_chain_registry = OnChainBindingRegistry()
+            self.on_chain_audit = OnChainAudit(chain_id="reference-deployment")
+            self._onchain_real = False
 
         # Layer 1: Policy & enforcement — with on-chain binding
         self.protocol = OnChainBoundProtocol(

@@ -53,6 +53,7 @@ class SafetyProtocol:
         audit: AuditTrail | None = None,
         monitor: Monitor | None = None,
         allowed_action_types: list[str] | None = None,
+        cost_meter: Any | None = None,
     ):
         """
         Args:
@@ -69,6 +70,11 @@ class SafetyProtocol:
                 referenced by scope_rules is used as the vocabulary. Passing
                 an explicit list is recommended — it forces you to name what
                 the agent can do.
+            cost_meter: Optional CostMeter that measures the REAL cost of each
+                executed action (see safety_protocol.cost_meter). When present,
+                the agent's declared estimated_cost is never the source of truth
+                for budget/cap/approval — the measured figure is. Without one,
+                budget enforcement runs on the estimate and logs budget_advisory.
         """
         self.agent_id = agent_id
         self.user_id = user_id
@@ -95,6 +101,9 @@ class SafetyProtocol:
             self.allowed_action_types = sorted({
                 r.action_type for r in self.scope_rules if r.action_type
             })
+
+        # Post-execution real-cost measurement (see safety_protocol.cost_meter).
+        self.cost_meter = cost_meter
 
         # Log initialization
         self.audit.append("protocol_initialized", agent_id, {
@@ -464,7 +473,8 @@ class SafetyProtocol:
                 return result
 
         # 6. All checks passed — ALLOW and execute
-        self._spent += effective_cost(request)
+        cost_now = effective_cost(request)  # estimate until/unless measured
+        self._spent += cost_now
         result = ActionResult(request.request_id, ActionOutcome.ALLOWED, executed=True)
 
         self.monitor.record_action(result, request)
@@ -473,11 +483,49 @@ class SafetyProtocol:
             "action_type": request.action_type,
             "target": request.target,
             "params": request.params,
-            "cost": effective_cost(request),
+            "cost": cost_now,
             "estimated_cost": request.estimated_cost,
             "measured_cost": request.measured_cost,
             "urgency": request.urgency,
         })
+
+        # 6b. Post-execution cost measurement. If a CostMeter is registered, the
+        # execution layer reports the REAL cost; we stamp it on the request and
+        # RECONCILE the running total to the measured figure (so budget accounting
+        # is authoritative, not estimate-based). A broken meter must not freeze the
+        # agent — we keep the estimate and log the error.
+        if self.cost_meter is not None and result.outcome == ActionOutcome.ALLOWED:
+            try:
+                real = self.cost_meter.measure(
+                    request.action_type, request.target, request.params, result)
+            except Exception as exc:
+                real = None
+                self.audit.append("cost_meter_error", self.agent_id, {
+                    "request_id": request.request_id,
+                    "error": repr(exc),
+                })
+            if real is not None:
+                real = float(real)
+                # Correct the running total: we added the estimate in step 6.
+                self._spent += (real - cost_now)
+                request.measured_cost = real
+                self.audit.append("cost_measured", self.agent_id, {
+                    "request_id": request.request_id,
+                    "measured_cost": real,
+                    "estimated_cost": request.estimated_cost,
+                })
+                # Re-validate the global budget against the measured total.
+                over = self._check_budget(request)
+                if over:
+                    result = ActionResult(
+                        request.request_id, ActionOutcome.BLOCKED_BUDGET,
+                        block_reason=f"post-execution measured cost breached budget: {over}")
+                    self.audit.append("action_blocked", self.agent_id, {
+                        "request_id": request.request_id,
+                        "action_type": request.action_type,
+                        "target": request.target,
+                        "reason": result.block_reason,
+                    })
 
         return result
 
